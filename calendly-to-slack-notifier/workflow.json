@@ -1,0 +1,291 @@
+{
+  "name": "Calendly → Slack + Sheets v2",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "21148dbe-f201-4441-8dfd-a60383e8ec18",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [4016, 1600]
+    },
+    {
+      "parameters": {
+        "url": "https://api.calendly.com/users/me",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "response": { "response": { "responseFormat": "json" } } }
+      },
+      "id": "36356094-d8a9-491b-acaa-aa230ea89a8c",
+      "name": "Get Calendly User",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4240, 1600],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER_CREDENTIAL_ID", "name": "Calendly Header Auth account" }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.calendly.com/scheduled_events",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "user", "value": "={{ $json.resource.uri }}" },
+            { "name": "min_start_time", "value": "={{ new Date(Date.now() - 3600000).toISOString() }}" },
+            { "name": "status", "value": "active" },
+            { "name": "count", "value": "100" },
+            { "name": "sort", "value": "start_time:asc" }
+          ]
+        },
+        "options": { "response": { "response": { "responseFormat": "json" } } }
+      },
+      "id": "089d61f9-38b9-40ef-a921-3405d76f2dc0",
+      "name": "List Scheduled Events",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [4464, 1600],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER_CREDENTIAL_ID", "name": "Calendly Header Auth account" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Passes through only bookings CREATED very recently.\n// Guard 1 of 2: an old booking can never notify, whatever the dedupe store says.\n\nconst WINDOW_MINUTES = 15;   // must be comfortably wider than the poll interval\n\nconst cutoff = Date.now() - WINDOW_MINUTES * 60 * 1000;\nconst events = $input.first().json.collection || [];\n\nreturn events\n  .filter(e => e.created_at && new Date(e.created_at).getTime() >= cutoff)\n  .map(e => ({\n    json: {\n      eventUri: e.uri,\n      eventName: e.name,\n      startTime: e.start_time,\n      endTime: e.end_time,\n      createdAt: e.created_at,\n      location: e.location || {},\n      memberships: e.event_memberships || []\n    }\n  }));"
+      },
+      "id": "08864502-8b38-4a7d-b54f-ccbe8b5fbb66",
+      "name": "Find New Bookings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4688, 1600],
+      "notes": "GUARD 1: only bookings created in the last 15 minutes get through."
+    },
+    {
+      "parameters": {
+        "operation": "removeItemsSeenInPreviousExecutions",
+        "dedupeValue": "={{ $json.eventUri }}",
+        "options": { "historySize": 1000 }
+      },
+      "id": "9fb0bc79-75a2-40a8-8c89-674fed621866",
+      "name": "Skip Already Notified",
+      "type": "n8n-nodes-base.removeDuplicates",
+      "typeVersion": 2,
+      "position": [4896, 1600],
+      "notes": "GUARD 2: dedupe history lives in the n8n database, so it survives across runs."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.eventUri }}/invitees",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "response": { "response": { "responseFormat": "json" } } }
+      },
+      "id": "f09eaf0e-627a-44d2-9cac-d6ce727f15a1",
+      "name": "Get Invitee Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [5120, 1600],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "credentials": {
+        "httpHeaderAuth": { "id": "PLACEHOLDER_CREDENTIAL_ID", "name": "Calendly Header Auth account" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pairs each invitee response with its event and builds the Slack message.\n// Pairs against \"Skip Already Notified\", NOT \"Find New Bookings\" - the dedupe\n// node drops items, so indices only line up after it.\n\nconst HOST_TZ = 'America/Denver'; // set this to your own timezone\n\nconst out = [];\nconst items = $input.all();\nconst events = $('Skip Already Notified').all();\n\nfor (let i = 0; i < items.length; i++) {\n  const ev = events[i].json;\n  const invitees = items[i].json.collection || [];\n\n  for (const p of invitees) {\n    const inviteeTz = p.timezone || 'UTC';\n\n    const fmt = (iso, zone) => {\n      if (!iso) return 'N/A';\n      return DateTime.fromISO(iso, { zone: 'utc' })\n        .setZone(zone)\n        .toFormat(\"ccc, dd LLL yyyy 'at' hh:mm a\");\n    };\n\n    let duration = '';\n    if (ev.startTime && ev.endTime) {\n      const mins = Math.round(\n        DateTime.fromISO(ev.endTime).diff(DateTime.fromISO(ev.startTime), 'minutes').minutes\n      );\n      duration = ' (' + mins + ' min)';\n    }\n\n    const loc = ev.location || {};\n    let locationText = 'N/A';\n    if (loc.join_url) locationText = '<' + loc.join_url + '|Join link>';\n    else if (loc.location) locationText = loc.location;\n    else if (loc.type) locationText = String(loc.type).replace(/_/g, ' ');\n\n    const host = (ev.memberships || [])[0] || {};\n\n    const qa = (p.questions_and_answers || [])\n      .filter(q => q.answer && String(q.answer).trim())\n      .map(q => '> *' + q.question + '*\\n> ' + q.answer)\n      .join('\\n');\n\n    const t = p.tracking || {};\n    const utm = [t.utm_source, t.utm_medium, t.utm_campaign, t.utm_content]\n      .filter(Boolean).join(' / ');\n\n    const lines = [];\n    lines.push(':calendar: *New Calendly Booking*');\n    lines.push('*Event:* ' + (ev.eventName || 'N/A') + duration);\n    lines.push('*Name:* ' + (p.name || 'N/A'));\n    lines.push('*Email:* ' + (p.email || 'N/A'));\n    if (p.text_reminder_number) lines.push('*Phone:* ' + p.text_reminder_number);\n    lines.push('*Their time:* ' + fmt(ev.startTime, inviteeTz) + '  _(' + inviteeTz + ')_');\n    if (inviteeTz !== HOST_TZ) {\n      lines.push('*Your time:* ' + fmt(ev.startTime, HOST_TZ) + '  _(' + HOST_TZ + ')_');\n    }\n    lines.push('*Location:* ' + locationText);\n    if (host.user_name) lines.push('*Host:* ' + host.user_name);\n    if (utm) lines.push('*Source:* ' + utm);\n    if (qa) lines.push('\\n*Answers:*\\n' + qa);\n\n    const links = [];\n    if (p.reschedule_url) links.push('<' + p.reschedule_url + '|Reschedule>');\n    if (p.cancel_url) links.push('<' + p.cancel_url + '|Cancel>');\n    if (links.length) lines.push('\\n' + links.join('  -  '));\n\n    out.push({\n      json: {\n        slackText: lines.join('\\n'),\n        eventUri: ev.eventUri,\n        inviteeName: p.name || null,\n        inviteeEmail: p.email || null,\n        startTime: ev.startTime || null,\n        bookedAt: ev.createdAt || null,\n        inviteeTimezone: inviteeTz,\n        eventName: ev.eventName || null\n      }\n    });\n  }\n}\n\nreturn out;"
+      },
+      "id": "dc5fbd78-cbb6-4b22-a003-ae13a9a5f280",
+      "name": "Format Booking",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [5344, 1600]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "#new-bookings", "mode": "name" },
+        "text": "={{ $json.slackText }}",
+        "otherOptions": { "includeLinkToWorkflow": false }
+      },
+      "id": "7477d00a-8250-475b-8a60-b23b1c462cc2",
+      "name": "Post to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [5568, 1600],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "slackApi": { "id": "PLACEHOLDER_CREDENTIAL_ID", "name": "Slack account" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Builds the Google Sheets row and works out which monthly tab it belongs in.\n// Reads from \"Format Booking\" because the Slack node upstream outputs Slack's\n// API response, not our booking data.\n\nconst HOST_TZ = 'America/Denver'; // set this to your own timezone\n\n// Which month's tab does a lead belong to? Based on WHEN IT WAS BOOKED.\n// To file by MEETING date instead, swap `bookedAt` for `startTime` below.\nconst TAB_BASIS = 'bookedAt';\n\nconst rows = [];\n\nfor (const item of $('Format Booking').all()) {\n  const j = item.json;\n\n  const basisIso = j[TAB_BASIS] || new Date().toISOString();\n  const basis = DateTime.fromISO(basisIso, { zone: 'utc' }).setZone(HOST_TZ);\n\n  // \"July-26\" -> full month name, dash, two-digit year\n  const sheetName = basis.toFormat('LLLL') + '-' + basis.toFormat('yy');\n\n  // Date column shows the MEETING time, not the booking time\n  const dateText = j.startTime\n    ? DateTime.fromISO(j.startTime, { zone: 'utc' })\n        .setZone(HOST_TZ)\n        .toFormat('yyyy-MM-dd hh:mm a')\n    : '';\n\n  rows.push({\n    json: {\n      sheetName: sheetName,\n      name: j.inviteeName || '',\n      email: j.inviteeEmail || '',\n      dateText: dateText\n    }\n  });\n}\n\nreturn rows;"
+      },
+      "id": "b2bbc2a9-fa45-499c-b957-69142b7a10ee",
+      "name": "Prepare Sheet Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [5776, 1600],
+      "notes": "Feeds TWO branches: the template check (upper) and the row append (lower)."
+    },
+    {
+      "parameters": {
+        "url": "https://sheets.googleapis.com/v4/spreadsheets/YOUR_SPREADSHEET_ID",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [{ "name": "fields", "value": "sheets.properties(sheetId,title)" }]
+        },
+        "options": {}
+      },
+      "id": "d7f4ce63-5690-4de9-bc3e-6abe202936ac",
+      "name": "Get Sheet List",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [6000, 1376],
+      "retryOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "PLACEHOLDER_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "notes": "Reads every tab's id + title."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decides whether this month's tab needs creating, and from which template.\n// Outputs zero items when there's nothing to do - this branch is a dead end,\n// so that is harmless.\n\nconst HOST_TZ = 'America/Denver'; // set this to your own timezone\nconst TEMPLATE_TAB = 'Template';   // hidden tab holding headers + dropdowns\n\nconst now = DateTime.now().setZone(HOST_TZ);\nconst target = now.toFormat('LLLL') + '-' + now.toFormat('yy');\n\nconst sheets = ($input.first().json.sheets || []).map(s => s.properties);\n\n// Already exists - nothing to do.\nif (sheets.some(s => s.title === target)) return [];\n\nconst tpl = sheets.find(s => s.title === TEMPLATE_TAB);\nif (!tpl) return [];   // no Template tab: do nothing rather than crash the run\n\nreturn [{\n  json: {\n    templateSheetId: tpl.sheetId,\n    newTitle: target,\n    insertIndex: sheets.length\n  }\n}];"
+      },
+      "id": "0b479b01-1d2e-4166-9389-9e5ac5c7e5e3",
+      "name": "Pick Template",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [6224, 1376],
+      "notes": "Outputs nothing if this month's tab already exists, or if the Template tab is missing."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://sheets.googleapis.com/v4/spreadsheets/YOUR_SPREADSHEET_ID:batchUpdate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ requests: [ { duplicateSheet: { sourceSheetId: $json.templateSheetId, insertSheetIndex: $json.insertIndex, newSheetName: $json.newTitle } } ] }) }}",
+        "options": {}
+      },
+      "id": "62d97509-48aa-4bae-882a-a5a864cb8aa1",
+      "name": "Duplicate Template",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [6448, 1376],
+      "retryOnFail": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "PLACEHOLDER_CREDENTIAL_ID", "name": "Google Sheets account" }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Copies the Template tab (formatting, dropdowns, all columns) into the new month tab."
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_SPREADSHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "={{ $('Prepare Sheet Row').item.json.sheetName }}", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Name": "={{ $('Prepare Sheet Row').item.json.name }}",
+            "Email": "={{ $('Prepare Sheet Row').item.json.email }}",
+            "Date ": "={{ $('Prepare Sheet Row').item.json.dateText }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            { "id": "Name", "displayName": "Name", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Email", "displayName": "Email", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "Date ", "displayName": "Date ", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false },
+            { "id": "Status Lead", "displayName": "Status Lead", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": true },
+            { "id": "Status - Cust.", "displayName": "Status - Cust.", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": true },
+            { "id": "Status - Priority", "displayName": "Status - Priority", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": true },
+            { "id": "Feedback ", "displayName": "Feedback ", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": true }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "70a9cc30-aeaa-4a77-83d5-83a518f74336",
+      "name": "Append Lead",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [6000, 1600],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "PLACEHOLDER_CREDENTIAL_ID", "name": "Google Sheets account" }
+      }
+    },
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "1 0 1 * *" }] }
+      },
+      "id": "ebeb6475-04ba-4181-a2e1-78f29910c0c8",
+      "name": "1st of Month 12:01 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [5776, 1152],
+      "notes": "Runs 00:01 on the 1st in the workflow timezone."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Current month's tab name, for the 1st-of-month pre-create run.\n\nconst HOST_TZ = 'America/Denver'; // set this to your own timezone\nconst now = DateTime.now().setZone(HOST_TZ);\n\nreturn [{ json: { sheetName: now.toFormat('LLLL') + '-' + now.toFormat('yy') } }];"
+      },
+      "id": "ffd4c340-5389-486d-9ede-4ce5da55d63f",
+      "name": "Month Tab Name",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [5776, 1280]
+    }
+  ],
+  "connections": {
+    "Every Minute": { "main": [[{ "node": "Get Calendly User", "type": "main", "index": 0 }]] },
+    "Get Calendly User": { "main": [[{ "node": "List Scheduled Events", "type": "main", "index": 0 }]] },
+    "List Scheduled Events": { "main": [[{ "node": "Find New Bookings", "type": "main", "index": 0 }]] },
+    "Find New Bookings": { "main": [[{ "node": "Skip Already Notified", "type": "main", "index": 0 }]] },
+    "Skip Already Notified": { "main": [[{ "node": "Get Invitee Details", "type": "main", "index": 0 }]] },
+    "Get Invitee Details": { "main": [[{ "node": "Format Booking", "type": "main", "index": 0 }]] },
+    "Format Booking": { "main": [[{ "node": "Post to Slack", "type": "main", "index": 0 }]] },
+    "Post to Slack": { "main": [[{ "node": "Prepare Sheet Row", "type": "main", "index": 0 }]] },
+    "Prepare Sheet Row": { "main": [[{ "node": "Get Sheet List", "type": "main", "index": 0 }, { "node": "Append Lead", "type": "main", "index": 0 }]] },
+    "Get Sheet List": { "main": [[{ "node": "Pick Template", "type": "main", "index": 0 }]] },
+    "Pick Template": { "main": [[{ "node": "Duplicate Template", "type": "main", "index": 0 }]] },
+    "1st of Month 12:01 AM": { "main": [[{ "node": "Month Tab Name", "type": "main", "index": 0 }]] },
+    "Month Tab Name": { "main": [[{ "node": "Get Sheet List", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Denver",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {}
+}
