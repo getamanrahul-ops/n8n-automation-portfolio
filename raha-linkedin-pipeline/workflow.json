@@ -1,0 +1,717 @@
+{
+  "name": "RaHa Studio - LinkedIn AEC Content Pipeline (Free Tier)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 19 */2 * *"
+            }
+          ]
+        }
+      },
+      "id": "11ac34aa-6ee9-4c36-864c-3c7938d2b931",
+      "name": "Every 2 Days Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        3904,
+        160
+      ],
+      "notes": "Runs 19:00 Asia/Dhaka (~9AM ET during EDT). Shift to 20:00 Nov-Mar (EST) manually."
+    },
+    {
+      "parameters": {
+        "jsCode": "const feeds = [\n  'https://news.google.com/rss/search?q=Revit+OR+BIM+OR+Navisworks+architecture+when:2d&hl=en-US&gl=US&ceid=US:en',\n  'https://news.google.com/rss/search?q=SketchUp+OR+Lumion+OR+Enscape+OR+Twinmotion+when:2d&hl=en-US&gl=US&ceid=US:en',\n  'https://news.google.com/rss/search?q=%22building+permit%22+OR+%22construction+documents%22+OR+ADU+when:2d&hl=en-US&gl=US&ceid=US:en',\n  'https://news.google.com/rss/search?q=AI+architecture+BIM+standards+when:2d&hl=en-US&gl=US&ceid=US:en',\n  'https://www.reddit.com/r/Revit/.rss',\n  'https://www.reddit.com/r/architecture/.rss',\n  'https://www.archdaily.com/rss/'\n];\nreturn feeds.map(url => ({ json: { url } }));"
+      },
+      "id": "ea644db0-4d20-4fff-bd3e-059a30e79bbb",
+      "name": "Build Feed List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4128,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.url}}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
+            },
+            {
+              "name": "Accept",
+              "value": "application/rss+xml, application/atom+xml, text/xml;q=0.9, */*;q=0.8"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 15000
+        }
+      },
+      "id": "906ffc70-3ae1-40ba-bf60-0f57861b94cf",
+      "name": "Fetch RSS Feeds (HTTP)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        4352,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "notes": "Reddit's .rss/.atom endpoint 429s the built-in RSS Feed Read node because it can't send a custom User-Agent. This HTTP Request node spoofs a browser UA, retries 3x with a 3s gap, and continues on failure so one blocked feed doesn't kill the whole run."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handles both RSS 2.0 (<item>) and Atom (<entry>, used by Reddit) without external XML libs.\nfunction stripCdataAndTags(s) {\n  if (!s) return '';\n  return s.replace(/<!\\[CDATA\\[/g, '').replace(/\\]\\]>/g, '').replace(/<[^>]+>/g, '').trim();\n}\nfunction extractTag(tag, block) {\n  const re = new RegExp('<' + tag + '[^>]*>([\\\\s\\\\S]*?)<\\\\/' + tag + '>', 'i');\n  const m = block.match(re);\n  return m ? stripCdataAndTags(m[1]) : '';\n}\nfunction extractLink(block) {\n  // Atom-style self-closing: <link rel=\"alternate\" href=\"...\"/>\n  const hrefMatch = block.match(/<link[^>]*href=\"([^\"]+)\"/i);\n  if (hrefMatch) return hrefMatch[1];\n  return extractTag('link', block);\n}\n\nconst out = [];\nfor (const item of $input.all()) {\n  const raw = item.json.data ?? item.json.body ?? (typeof item.json === 'string' ? item.json : null);\n  if (!raw || typeof raw !== 'string') continue; // skip failed/blocked feed fetches\n\n  const blocks = raw.match(/<item[\\s\\S]*?<\\/item>|<entry[\\s\\S]*?<\\/entry>/gi) || [];\n  for (const block of blocks) {\n    const title = extractTag('title', block);\n    if (!title) continue;\n    const link = extractLink(block);\n    const pubDate = extractTag('pubDate', block) || extractTag('updated', block) || extractTag('published', block);\n    const summary = (extractTag('description', block) || extractTag('summary', block) || extractTag('content', block)).slice(0, 500);\n    out.push({ json: { title, link, pubDate, summary } });\n  }\n}\nreturn out;"
+      },
+      "id": "e41ee3fc-aa60-4699-a77b-97e081480620",
+      "name": "Parse & Normalize Feed XML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4464,
+        160
+      ],
+      "notes": "Reddit returns Atom XML (<entry>), Google News/ArchDaily return RSS 2.0 (<item>) — this parser handles both with regex, no external deps."
+    },
+    {
+      "parameters": {
+        "jsCode": "const cutoff = Date.now() - 48*60*60*1000;\nconst out = [];\nfor (const item of $input.all()) {\n  const d = item.json.pubDate || item.json.isoDate || item.json.date;\n  const t = d ? new Date(d).getTime() : 0;\n  if (t >= cutoff) {\n    out.push({\n      json: {\n        title: item.json.title || '',\n        summary: (item.json.content || item.json.contentSnippet || item.json.summary || '').toString().slice(0, 500),\n        link: item.json.link || '',\n        pubDate: d\n      }\n    });\n  }\n}\nreturn out;"
+      },
+      "id": "953df265-25ad-48d9-873f-4a108ded9de4",
+      "name": "Filter Last 48h",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4576,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const keywords = ['Revit','BIM','SketchUp','Lumion','Navisworks','Bluebeam','AutoCAD','Enscape','Twinmotion','ADU','permit','construction documents','AI architecture'];\nconst items = $input.all().map(i => i.json);\nconst counts = {};\nconst examples = {};\nfor (const kw of keywords) counts[kw] = 0;\nfor (const it of items) {\n  const text = (it.title + ' ' + it.summary).toLowerCase();\n  for (const kw of keywords) {\n    if (text.includes(kw.toLowerCase())) {\n      counts[kw]++;\n      if (!examples[kw] || new Date(it.pubDate) > new Date(examples[kw].pubDate)) {\n        examples[kw] = it;\n      }\n    }\n  }\n}\nlet topKw = null, topCount = 0;\nfor (const kw of keywords) {\n  if (counts[kw] > topCount) { topCount = counts[kw]; topKw = kw; }\n}\nif (!topKw) {\n  // fallback: no keyword matches, use most recent item overall\n  const sorted = items.sort((a,b) => new Date(b.pubDate) - new Date(a.pubDate));\n  return [{ json: { keyword: 'AEC industry', count: 0, article: sorted[0] || { title: 'General AEC trends', summary: '', link: '' } } }];\n}\nreturn [{ json: { keyword: topKw, count: topCount, article: examples[topKw] } }];"
+      },
+      "id": "03a43540-1d69-4943-b743-015c5dd6fe9f",
+      "name": "Rank Trending Topic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4784,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "prompt",
+              "type": "string",
+              "value": "=You are the content writer for RaHa Studio, a freelance architectural drafting/MEP/BIM practice (Revit specialist, ~10 years experience) targeting US clients, especially California ADU permit drawing sets. Write ONE LinkedIn post about this trending AEC topic: \"{{$json.keyword}}\" — context article: \"{{$json.article.title}}\" ({{$json.article.summary}}).\n\nThe post must be: a strong hook first line, short punchy paragraphs with line breaks, either educational / hot-take / \"did you know\" style, end with a clear CTA (e.g. inviting DMs/connections for ADU or construction doc work), and include naturally-woven SEO keywords (Revit, BIM, ADU, architecture, construction documents). Add 3-5 relevant hashtags.\n\nAlso write a separate detailed image-generation prompt for a clean, modern, professional architectural visual that complements the post (no text/words in the image, no people's faces, photorealistic or clean 3D render style).\n\nRespond with ONLY valid JSON, no markdown fences, no preamble, in exactly this shape:\n{\"post_text\": \"...\", \"hashtags\": [\"#tag1\",\"#tag2\"], \"image_prompt\": \"...\"}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1f0b84d4-8215-484f-833b-cca7edcc1e31",
+      "name": "Build LLM Prompt",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        5008,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ models: [\"openrouter/free\", \"openai/gpt-oss-120b:free\", \"google/gemma-4-31b-it:free\"], messages: [ { role: \"user\", content: $json.prompt } ], temperature: 0.9 }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "58096d4d-6834-4f2f-9ae2-c30c8b4f18bf",
+      "name": "Generate Post + Image Prompt (OpenRouter)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5232,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_HTTP_HEADER_AUTH_CREDENTIAL_ID",
+          "name": "Header Auth account"
+        }
+      },
+      "notes": "Uses OpenRouter's 'models' array so if the first free model is throttled or removed, it falls back automatically. Primary is 'openrouter/free' (OpenRouter's own auto-router across whatever free models are healthy right now), then two specific stable free slugs as of July 2026. Free-tier rate limit is currently ~20 req/min, ~200 req/day shared across all free models on your account. The free roster changes often (some models lose :free status without notice) — verify at openrouter.ai/models if you see repeated 429s."
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $json.choices?.[0]?.message?.content || '';\nconst cleaned = raw.replace(/```json|```/g, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(cleaned);\n} catch (e) {\n  throw new Error('LLM did not return valid JSON: ' + cleaned.slice(0,300));\n}\nif (!parsed.post_text || !parsed.image_prompt) {\n  throw new Error('LLM JSON missing required fields');\n}\nreturn [{ json: {\n  post_text: parsed.post_text,\n  hashtags: Array.isArray(parsed.hashtags) ? parsed.hashtags.join(' ') : (parsed.hashtags || ''),\n  image_prompt: parsed.image_prompt,\n  trending_topic: $('Rank Trending Topic').first().json.keyword\n} }];"
+      },
+      "id": "02523676-968e-4cb6-8ecf-1fbe702967fa",
+      "name": "Parse LLM JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5456,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://image.pollinations.ai/prompt/{{encodeURIComponent($json.image_prompt)}}?width=1024&height=1024&nologo=true&model=flux",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "62efbc19-dcc3-43b9-b5e3-58c04c0c930c",
+      "name": "Generate Image (Pollinations)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        5664,
+        160
+      ],
+      "notes": "No API key required for this volume. Register free key at enter.pollinations.ai only if you scale up frequency."
+    },
+    {
+      "parameters": {
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list",
+          "cachedResultName": "My Drive",
+          "cachedResultUrl": "https://drive.google.com/drive/my-drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "YOUR_FEED_SOURCE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "Linkedin Post Image",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/YOUR_FEED_SOURCE_SHEET_ID"
+        },
+        "options": {}
+      },
+      "id": "b9b4cdcd-830e-4a05-b1c0-ed8677158657",
+      "name": "Upload to Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        5888,
+        160
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      },
+      "notes": "The 'fields' option is set explicitly because Google Drive's API only returns fields you request — without this, webViewLink/webContentLink can come back missing (null) downstream."
+    },
+    {
+      "parameters": {
+        "operation": "share",
+        "fileId": {
+          "__rl": true,
+          "value": "={{ $json.id }}",
+          "mode": "id"
+        },
+        "permissionsUi": {
+          "permissionsValues": {
+            "role": "reader",
+            "type": "anyone"
+          }
+        },
+        "options": {}
+      },
+      "id": "334a3927-6ce4-49a6-9784-7d8d7009e302",
+      "name": "Share (Anyone with Link)",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        6112,
+        160
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{false}}",
+              "rightValue": "={{true}}",
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ff43022c-d4cf-4b5b-bcf5-05eaf252dedc",
+      "name": "Check Auto-Post Capability",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        6336,
+        160
+      ],
+      "notes": "Hard-coded false: LinkedIn's w_member_social scope requires LinkedIn app-review approval for personal-profile posting, which is not reliably obtainable for free/small apps. Flip this only if you have that approval and add a LinkedIn node on the true branch."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "Date",
+              "type": "string",
+              "value": "={{$now.format('yyyy-MM-dd')}}"
+            },
+            {
+              "name": "Trending Topic",
+              "type": "string",
+              "value": "={{$('Parse LLM JSON').first().json.trending_topic}}"
+            },
+            {
+              "name": "LinkedIn Post Text",
+              "type": "string",
+              "value": "={{$('Parse LLM JSON').first().json.post_text}}"
+            },
+            {
+              "name": "Hashtags",
+              "type": "string",
+              "value": "={{$('Parse LLM JSON').first().json.hashtags}}"
+            },
+            {
+              "name": "Image Prompt",
+              "type": "string",
+              "value": "={{$('Parse LLM JSON').first().json.image_prompt}}"
+            },
+            {
+              "name": "Image Drive Link",
+              "type": "string",
+              "value": "={{$('Upload to Drive').first().json.webViewLink}}"
+            },
+            {
+              "name": "Post Status",
+              "type": "string",
+              "value": "Pending Manual Post"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0f2ee5eb-c615-46f2-8694-0d9f3baf21d8",
+      "name": "Compose Row Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        6544,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_POST_LOG_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "Linkedin Post Content",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_POST_LOG_SHEET_ID/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_POST_LOG_SHEET_ID/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $json.Date }}",
+            "Trending Topic": "={{ $json['Trending Topic'] }}",
+            "Post Text": "={{ $json['LinkedIn Post Text'] }}",
+            "Hanstag": "={{ $json.Hashtags }}",
+            "Image Promt": "={{ $json['Image Prompt'] }}",
+            "Image URL": "={{ $json['Image Drive Link'] }}",
+            "Post Status": "={{ $json['Post Status'] }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Date",
+              "displayName": "Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Trending Topic",
+              "displayName": "Trending Topic",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Post Text",
+              "displayName": "Post Text",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Hanstag",
+              "displayName": "Hanstag",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Image Promt",
+              "displayName": "Image Promt",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Image URL",
+              "displayName": "Image URL",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Post Status",
+              "displayName": "Post Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "8b19faaa-c37e-4c18-a5eb-b60278ed1999",
+      "name": "Log to Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        6768,
+        272
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "@ainewswithn8n",
+        "file": "={{$('Upload to Drive').first().json.webContentLink}}",
+        "additionalFields": {}
+      },
+      "id": "4fa2481a-609f-41d4-8808-c00a6b568c13",
+      "name": "Notify via Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        7200,
+        272
+      ],
+      "webhookId": "90276c2f-63f6-4a7c-ad4b-806383bf157d",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "@ainewswithn8n",
+        "text": "={{ $json['Post Text'] }}\n{{ $json.Hanstag }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "eb6f96bc-c9f0-4b7c-8f0f-3c99ef6ace08",
+      "name": "Notify via Telegram1",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        7008,
+        272
+      ],
+      "webhookId": "90276c2f-63f6-4a7c-ad4b-806383bf157d",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 2 Days Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Feed List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Feed List": {
+      "main": [
+        [
+          {
+            "node": "Fetch RSS Feeds (HTTP)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch RSS Feeds (HTTP)": {
+      "main": [
+        [
+          {
+            "node": "Parse & Normalize Feed XML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Normalize Feed XML": {
+      "main": [
+        [
+          {
+            "node": "Filter Last 48h",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Last 48h": {
+      "main": [
+        [
+          {
+            "node": "Rank Trending Topic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rank Trending Topic": {
+      "main": [
+        [
+          {
+            "node": "Build LLM Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build LLM Prompt": {
+      "main": [
+        [
+          {
+            "node": "Generate Post + Image Prompt (OpenRouter)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Post + Image Prompt (OpenRouter)": {
+      "main": [
+        [
+          {
+            "node": "Parse LLM JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LLM JSON": {
+      "main": [
+        [
+          {
+            "node": "Generate Image (Pollinations)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Image (Pollinations)": {
+      "main": [
+        [
+          {
+            "node": "Upload to Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to Drive": {
+      "main": [
+        [
+          {
+            "node": "Share (Anyone with Link)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Share (Anyone with Link)": {
+      "main": [
+        [
+          {
+            "node": "Check Auto-Post Capability",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Auto-Post Capability": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Compose Row Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose Row Data": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log to Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Notify via Telegram1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify via Telegram1": {
+      "main": [
+        [
+          {
+            "node": "Notify via Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}
