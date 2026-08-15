@@ -1,0 +1,1004 @@
+{
+  "name": "Telegram Equipment Photo Logger",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "channel_post"
+        ],
+        "additionalFields": {}
+      },
+      "id": "852b82ca-9b55-4c39-8f8b-70ce974e76a1",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -848,
+        144
+      ],
+      "webhookId": "telegram-equipment-photo-logger",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has-photo-and-caption",
+              "leftValue": "={{ Array.isArray($json.channel_post?.photo) && $json.channel_post.photo.length > 0 && typeof $json.channel_post?.caption === 'string' && $json.channel_post.caption.trim().length > 0 }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c518f75c-ab9c-4ed3-b978-1d222cf6f037",
+      "name": "Has Photo + Caption?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -624,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Grab the message and caption\nconst message = $json.channel_post;\nconst caption = message.caption || '';\n\nconst parts = {};\n\n// Split by commas OR new lines, and standardize keys to lowercase\ncaption.split(/,|\\n/).forEach(pair => {\n  const idx = pair.indexOf(':');\n  if (idx === -1) return;\n  \n  // Convert the key to lowercase so \"Equipment Name\" and \"Equipment name\" are treated exactly the same\n  const key = pair.slice(0, idx).trim().toLowerCase();\n  const value = pair.slice(idx + 1).trim();\n  \n  if (key) parts[key] = value;\n});\n\nconst photos = message.photo || [];\nconst largestPhoto = photos[photos.length - 1]; // Grab the highest resolution\n\n// 1. Verify a Type was provided at all\nif (!parts['type']) {\n  throw new Error('Caption missing \"Type\". Received: \"' + caption + '\"');\n}\n\nconst type = parts['type'].toUpperCase();\n\n// Prepare our output variables\nlet panelName = null;\nlet equipmentName = null;\nlet location = null;\nlet details = null;\nlet remark = null;\n\n// 2. Validate based on the specific Type\nif (type === 'E') {\n    panelName = parts['panel name'];\n    equipmentName = parts['equipment name'];\n    location = parts['location'];\n    \n    if (!panelName || !equipmentName || !location) {\n        throw new Error('Electrical caption missing fields. Required: Type, Panel Name, Equipment name, Location. Received: \"' + caption + '\"');\n    }\n} else if (type === 'M') {\n    equipmentName = parts['equipment name'];\n    location = parts['location'];\n    details = parts['details'];\n    remark = parts['remark'];\n    \n    if (!equipmentName || !location || !details || !remark) {\n        throw new Error('Mechanical caption missing fields. Required: Type, Equipment Name, Location, Details, Remark. Received: \"' + caption + '\"');\n    }\n} else {\n    throw new Error('Invalid Type. Must be exactly E or M. Received: \"' + type + '\"');\n}\n\n// 3. Output the structured data for the Switch node\nreturn [{\n  json: {\n    type: type,\n    panelName: panelName,\n    equipmentName: equipmentName,\n    location: location,\n    details: details,\n    remark: remark,\n    chatId: message.chat.id,\n    messageId: message.message_id,\n    fileId: largestPhoto ? largestPhoto.file_id : null\n  }\n}];"
+      },
+      "id": "6ec27336-f5a8-4ed0-adc8-1e2c2b025bbf",
+      "name": "Parse Caption",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1866505312,
+          "mode": "list",
+          "cachedResultName": "Master Electrical",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=1866505312"
+        },
+        "options": {}
+      },
+      "id": "88804836-9cdd-47a0-8d46-1e3f1e6f37de",
+      "name": "Get All Sheet Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        48,
+        -144
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Work out the next Serial Number by looking at the existing\n// \"Picture S/N\" column and taking the max + 1.\nconst rows = $input.all().map(item => item.json);\n\nlet maxSn = 0;\nfor (const row of rows) {\n  const sn = parseInt(row['Picture S/N'], 10);\n  if (!isNaN(sn) && sn > maxSn) maxSn = sn;\n}\nconst newSn = maxSn + 1;\n\nconst parsed = $('Parse Caption').first().json;\n\nreturn [{\n  json: {\n    ...parsed,\n    serialNumber: newSn,\n    fileBaseName: `${newSn}_${parsed.equipmentName}`\n  }\n}];\n"
+      },
+      "id": "41a0220d-d65d-4519-b4e0-865e3e549249",
+      "name": "Compute Serial Number",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $('Has Photo + Caption?').item.json.channel_post.photo[3].file_id }}",
+        "additionalFields": {}
+      },
+      "id": "b54d98ed-ab3e-4700-b97a-900ec8aba1c8",
+      "name": "Download Telegram Photo",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        496,
+        -144
+      ],
+      "webhookId": "0fc36d0c-11ed-4655-bf5d-720b8129110c",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rename the downloaded binary file to <S/N>_<Equipment Name>.<ext>\nconst items = $input.all();\nconst computed = $('Compute Serial Number').first().json;\nconst item = items[0];\n\nconst binaryData = item.binary.data;\nconst ext = (binaryData.fileExtension || binaryData.mimeType?.split('/')[1] || 'jpg').replace(/[^a-zA-Z0-9]/g, '');\nconst newFileName = `${computed.fileBaseName}.${ext}`;\n\nitem.binary.data.fileName = newFileName;\nitem.json.finalFileName = newFileName;\n\nreturn [item];\n"
+      },
+      "id": "a5e9918d-51e1-49e5-ba81-da8f9424f203",
+      "name": "Rename File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "name": "={{ $json.finalFileName }}",
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list",
+          "cachedResultName": "My Drive",
+          "cachedResultUrl": "https://drive.google.com/drive/my-drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "YOUR_ELECTRICAL_DRIVE_FOLDER_ID",
+          "mode": "list",
+          "cachedResultName": "Equipment Picture",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/YOUR_ELECTRICAL_DRIVE_FOLDER_ID"
+        },
+        "options": {}
+      },
+      "id": "0f5fc97f-bb72-458a-b332-bbadfb59fc80",
+      "name": "Upload to Google Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        944,
+        -144
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "share",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.id }}"
+        },
+        "permissionsUi": {
+          "permissionsValues": {
+            "role": "reader",
+            "type": "anyone"
+          }
+        },
+        "options": {}
+      },
+      "id": "182373f6-eb52-4e9e-a0c6-3a47419c28d0",
+      "name": "Share File (Anyone with Link)",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1168,
+        -144
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the shareable Drive link and merge with all earlier data.\nconst uploaded = $('Upload to Google Drive').first().json;\nconst computed = $('Compute Serial Number').first().json;\n\nconst driveLink = `https://drive.google.com/file/d/${uploaded.id}/view?usp=sharing`;\n\nreturn [{\n  json: {\n    ...computed,\n    driveFileId: uploaded.id,\n    driveLink\n  }\n}];\n"
+      },
+      "id": "112bbf7b-50c1-484d-a455-ab4a810aaad6",
+      "name": "Build Drive Link",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1392,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1866505312,
+          "mode": "list",
+          "cachedResultName": "Master Electrical",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=1866505312"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Equipment Name": "={{ $('Parse Caption').item.json.equipmentName }}",
+            "Location": "={{ $('Parse Caption').item.json.location }}",
+            "Picture S/N": "={{ $json.serialNumber }}",
+            "Picture Drive Link": "={{ $json.driveLink }}",
+            "Panel Name": "={{ $('Parse Caption').item.json.panelName }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Panel Name",
+              "displayName": "Panel Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Equipment Name",
+              "displayName": "Equipment Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Location",
+              "displayName": "Location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Picture S/N",
+              "displayName": "Picture S/N",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Picture Drive Link",
+              "displayName": "Picture Drive Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "4552dda9-16a5-48b7-8311-ec2dbdb1abcb",
+      "name": "Append Row to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1616,
+        -144
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.channel_post.chat.id }}",
+        "text": "=✅ Logged successfully!\nName: {{ $json['Equipment Name'] }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "reply_to_message_id": "={{ $('Parse Caption').first().json.messageId }}"
+        }
+      },
+      "id": "f2450b25-802d-4138-a345-130a7d4d568d",
+      "name": "Send Confirmation",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1840,
+        -144
+      ],
+      "webhookId": "982cec2d-ead7-4985-a804-ec35dacd41c2",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.channel_post.chat.id }}",
+        "text": "=⚠️ I couldn't process that message.\n\nPlease send a photo with a caption in this exact format:\nPanel Name: <value>, Equipment Name: <value>, Location: <value>",
+        "additionalFields": {
+          "reply_to_message_id": "={{ $json.channel_post.message_id }}"
+        }
+      },
+      "id": "c1f0a574-a3d6-44d8-ad49-8b1bc8b6ff7c",
+      "name": "Send Format Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -400,
+        240
+      ],
+      "webhookId": "4999f749-fc31-43a4-a0f6-2ab171b893fb",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.type }}",
+                    "rightValue": "E",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "32ae3b7a-d5b3-4632-8e68-f1283ef81d16"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "E"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "52de156a-4221-47fc-9930-14eb663e3d1d",
+                    "leftValue": "={{ $json.type }}",
+                    "rightValue": "M",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "M"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        -176,
+        48
+      ],
+      "id": "827b8f96-9f80-46db-ab92-9c438b3beeac",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 871707908,
+          "mode": "list",
+          "cachedResultName": "Master Mechanical",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=871707908"
+        },
+        "options": {}
+      },
+      "id": "87d8ea5a-bb0d-4eff-a4a7-9d3743ef493c",
+      "name": "Get All Sheet Rows1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        48,
+        208
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Work out the next Serial Number by looking at the existing\n// \"Picture S/N\" column and taking the max + 1.\nconst rows = $input.all().map(item => item.json);\n\nlet maxSn = 0;\nfor (const row of rows) {\n  const sn = parseInt(row['Picture S/N'], 10);\n  if (!isNaN(sn) && sn > maxSn) maxSn = sn;\n}\nconst newSn = maxSn + 1;\n\nconst parsed = $('Parse Caption').first().json;\n\nreturn [{\n  json: {\n    ...parsed,\n    serialNumber: newSn,\n    fileBaseName: `${newSn}_${parsed.equipmentName}`\n  }\n}];\n"
+      },
+      "id": "54aafd28-7e66-478b-91dd-a98ae0fd8a3b",
+      "name": "Compute Serial Number1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "file",
+        "fileId": "={{ $('Has Photo + Caption?').item.json.channel_post.photo[3].file_id }}",
+        "additionalFields": {}
+      },
+      "id": "da8cb09e-96c8-4725-8f49-4db152ca6ebb",
+      "name": "Download Telegram Photo1",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        496,
+        208
+      ],
+      "webhookId": "0fc36d0c-11ed-4655-bf5d-720b8129110c",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rename the downloaded binary file to <S/N>_<Equipment Name>.<ext>\nconst items = $input.all();\nconst computed = $('Compute Serial Number1').first().json;\nconst item = items[0];\n\nconst binaryData = item.binary.data;\nconst ext = (binaryData.fileExtension || binaryData.mimeType?.split('/')[1] || 'jpg').replace(/[^a-zA-Z0-9]/g, '');\nconst newFileName = `${computed.fileBaseName}.${ext}`;\n\nitem.binary.data.fileName = newFileName;\nitem.json.finalFileName = newFileName;\n\nreturn [item];\n"
+      },
+      "id": "21bf506d-e47a-4d2b-91fe-9c4de9df9c85",
+      "name": "Rename File1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "name": "={{ $json.finalFileName }}",
+        "driveId": {
+          "__rl": true,
+          "value": "My Drive",
+          "mode": "list",
+          "cachedResultName": "My Drive",
+          "cachedResultUrl": "https://drive.google.com/drive/my-drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "YOUR_MECHANICAL_DRIVE_FOLDER_ID",
+          "mode": "list",
+          "cachedResultName": "Mech Equipment Picture",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/YOUR_MECHANICAL_DRIVE_FOLDER_ID"
+        },
+        "options": {}
+      },
+      "id": "5239a1b0-e6d6-4b25-bf8f-c54446185bdb",
+      "name": "Upload to Google Drive1",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        944,
+        208
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "share",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.id }}"
+        },
+        "permissionsUi": {
+          "permissionsValues": {
+            "role": "reader",
+            "type": "anyone"
+          }
+        },
+        "options": {}
+      },
+      "id": "8978589c-8456-48cc-9a43-7325e728428d",
+      "name": "Share File (Anyone with Link)1",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1168,
+        208
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the shareable Drive link and merge with all earlier data.\nconst uploaded = $('Upload to Google Drive1').first().json;\nconst computed = $('Compute Serial Number1').first().json;\n\nconst driveLink = `https://drive.google.com/file/d/${uploaded.id}/view?usp=sharing`;\n\nreturn [{\n  json: {\n    ...computed,\n    driveFileId: uploaded.id,\n    driveLink\n  }\n}];\n"
+      },
+      "id": "8a64fc04-7927-4fbc-9a6e-8946d0d4ab6b",
+      "name": "Build Drive Link1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1392,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 871707908,
+          "mode": "list",
+          "cachedResultName": "Master Mechanical",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=871707908"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Equipment Name": "={{ $json.equipmentName }}",
+            "Location": "={{ $json.location }}",
+            "Details": "={{ $json.details }}",
+            "Picture S/N": "={{ $json.serialNumber }}",
+            "Picture Drive Link": "={{ $json.driveLink }}",
+            "Remark": "={{ $json.remark }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Equipment Name",
+              "displayName": "Equipment Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Location",
+              "displayName": "Location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Details",
+              "displayName": "Details",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Picture S/N",
+              "displayName": "Picture S/N",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Picture Drive Link",
+              "displayName": "Picture Drive Link",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Remark",
+              "displayName": "Remark",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "fd9b565c-05f1-4498-8972-b482c066ac3d",
+      "name": "Append Row to Sheet1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1616,
+        208
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.channel_post.chat.id }}",
+        "text": "=✅ Logged successfully!\nName: {{ $json['Equipment Name'] }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "reply_to_message_id": "={{ $('Parse Caption').first().json.messageId }}"
+        }
+      },
+      "id": "f27237de-2db8-4080-af09-0bc0f6420ee5",
+      "name": "Send Confirmation1",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1840,
+        208
+      ],
+      "webhookId": "982cec2d-ead7-4985-a804-ec35dacd41c2",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "Electrical",
+        "height": 272,
+        "width": 2064,
+        "color": 3
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -32,
+        -224
+      ],
+      "id": "b430eec8-7e40-4993-9149-da36de3b50a2",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "Mechanical",
+        "height": 272,
+        "width": 2064,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -32,
+        144
+      ],
+      "id": "6e94a27f-3fa4-4fcd-a80e-49181cf0cc25",
+      "name": "Sticky Note1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Has Photo + Caption?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Photo + Caption?": {
+      "main": [
+        [
+          {
+            "node": "Parse Caption",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Format Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Caption": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get All Sheet Rows": {
+      "main": [
+        [
+          {
+            "node": "Compute Serial Number",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Serial Number": {
+      "main": [
+        [
+          {
+            "node": "Download Telegram Photo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Telegram Photo": {
+      "main": [
+        [
+          {
+            "node": "Rename File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rename File": {
+      "main": [
+        [
+          {
+            "node": "Upload to Google Drive",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to Google Drive": {
+      "main": [
+        [
+          {
+            "node": "Share File (Anyone with Link)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Share File (Anyone with Link)": {
+      "main": [
+        [
+          {
+            "node": "Build Drive Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Drive Link": {
+      "main": [
+        [
+          {
+            "node": "Append Row to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Row to Sheet": {
+      "main": [
+        [
+          {
+            "node": "Send Confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Get All Sheet Rows",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get All Sheet Rows1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get All Sheet Rows1": {
+      "main": [
+        [
+          {
+            "node": "Compute Serial Number1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Serial Number1": {
+      "main": [
+        [
+          {
+            "node": "Download Telegram Photo1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Telegram Photo1": {
+      "main": [
+        [
+          {
+            "node": "Rename File1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rename File1": {
+      "main": [
+        [
+          {
+            "node": "Upload to Google Drive1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload to Google Drive1": {
+      "main": [
+        [
+          {
+            "node": "Share File (Anyone with Link)1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Share File (Anyone with Link)1": {
+      "main": [
+        [
+          {
+            "node": "Build Drive Link1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Drive Link1": {
+      "main": [
+        [
+          {
+            "node": "Append Row to Sheet1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Row to Sheet1": {
+      "main": [
+        [
+          {
+            "node": "Send Confirmation1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}
