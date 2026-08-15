@@ -1,0 +1,449 @@
+{
+  "name": "Task Reminder — P. Bot Handler (polling, no webhook)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "3b85b358-a909-43aa-86f6-39db978eabbe",
+      "name": "P. Every minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1328,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c8a200f5-6f21-4f5e-b863-4eceecc9b24e",
+              "name": "BOT_TOKEN",
+              "value": "YOUR_TELEGRAM_BOT_TOKEN",
+              "type": "string"
+            },
+            {
+              "id": "06705de6-4fec-43cd-9f4b-ad0a159ade22",
+              "name": "SHEET_ID",
+              "value": "YOUR_GOOGLE_SHEET_ID",
+              "type": "string"
+            },
+            {
+              "id": "9c50bc70-db63-47ab-b9ad-1b15ac2db0ad",
+              "name": "GROUP_CHAT_ID",
+              "value": "YOUR_GROUP_CHAT_ID",
+              "type": "string"
+            },
+            {
+              "id": "1fbaa6fa-4fc3-4805-b755-22cc7ea068a8",
+              "name": "ADMIN_IDS",
+              "value": "YOUR_ADMIN_TELEGRAM_USER_ID",
+              "type": "string"
+            },
+            {
+              "id": "350c213b-9a84-4319-98b1-1ec9992c1e4a",
+              "name": "TZ",
+              "value": "Asia/Dhaka",
+              "type": "string"
+            },
+            {
+              "id": "73843052-0489-4412-a055-10a2988caf05",
+              "name": "MAX_EXTENSIONS",
+              "value": "2",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "01b746b9-851e-495b-bfe3-68f6f10c2a0d",
+      "name": "P. Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -1136,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst sd = $getWorkflowStaticData('global');\nconst last = parseInt(sd.lastUpdateId, 10) || 0;\n// offset 0 on a cold start means \"give me whatever is still queued\"\nreturn [{ json: { offset: last > 0 ? last + 1 : 0, lastSeen: last } }];\n"
+      },
+      "id": "64eaf8b2-0330-4c45-baee-ed289ae582f4",
+      "name": "P. Get offset",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -928,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{ $('P. Config').first().json.BOT_TOKEN }}/getUpdates?offset={{ $json.offset }}&limit=100&timeout=0",
+        "options": {}
+      },
+      "id": "61a63bc1-0fd4-4c48-9d5c-aa0abf123101",
+      "name": "P. Get updates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -736,
+        640
+      ],
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "parameters": {
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $('P. Config').first().json.SHEET_ID }}/values/Tasks!A1:U2000",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "options": {}
+      },
+      "id": "67430489-5151-477f-9302-7b37ecdf709a",
+      "name": "P. Read Tasks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -528,
+        640
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $('P. Config').first().json.SHEET_ID }}/values/People!A1:D500",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "options": {}
+      },
+      "id": "16fa7a64-1011-4765-977c-6565b079d1ba",
+      "name": "P. Read People",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -336,
+        640
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('P. Config').first().json;\n\n// ---- shared helpers -------------------------------------------------\nconst TZ = cfg.TZ || 'Asia/Dhaka';\nconst dfmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });\nconst sfmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });\nconst today = dfmt.format(new Date());\nconst nowStamp = sfmt.format(new Date());\n\nconst addDays = (iso, n) => {\n  const d = new Date(iso + 'T00:00:00Z');\n  d.setUTCDate(d.getUTCDate() + (parseInt(n, 10) || 0));\n  return d.toISOString().slice(0, 10);\n};\nconst daysBetween = (a, b) =>\n  Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);\nconst norm = (v) => {\n  if (v === null || v === undefined || v === '') return '';\n  const s = String(v).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}/.test(s)) return s.slice(0, 10);\n  const d = new Date(s);\n  return isNaN(d.getTime()) ? '' : dfmt.format(d);\n};\nconst esc = (s) => String(s === undefined || s === null ? '' : s)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst colLetter = (i) => String.fromCharCode(65 + i);\n\n// Tasks sheet layout: A..U. Bot owns A and I..U.\nconst TASK_COLS = ['Task ID','Task Name','Assignee','Telegram User ID','Duration','Interval',\n  'Repeat','Repeat Every','Start Date','End Date','Next Run','Status','Cycle','Last Sent',\n  'Completed At','Completed By','Method','Proof URL','Extension Days','Extension Count','DM Message ID'];\n// index inside the I..U slice (13 wide)\nconst IJ = { start:0, end:1, next:2, status:3, cycle:4, lastSent:5, completedAt:6,\n             completedBy:7, method:8, proof:9, extDays:10, extCount:11, dmMsgId:12 };\n\nfunction parseTasks(values) {\n  if (!values || values.length < 2) return [];\n  const head = (values[0] || []).map((h) => String(h || '').trim());\n  const at = (name) => head.indexOf(name);\n  for (const c of TASK_COLS) {\n    if (at(c) < 0) throw new Error('Tasks sheet is missing the column: ' + c);\n  }\n  const out = [];\n  for (let r = 1; r < values.length; r++) {\n    const row = values[r] || [];\n    const g = (name) => String(row[at(name)] === undefined ? '' : row[at(name)]).trim();\n    const taskName = g('Task Name');\n    const userId = g('Telegram User ID');\n    if (!taskName && !userId) continue;             // truly blank row\n    const raw = [];\n    for (let i = 8; i <= 20; i++) raw.push(row[i] === undefined ? '' : row[i]);\n    out.push({\n      rowNumber: r + 1,\n      id: g('Task ID'),\n      name: taskName,\n      assignee: g('Assignee') || 'Unassigned',\n      userId,\n      duration: parseInt(g('Duration'), 10) || 0,\n      interval: parseInt(g('Interval'), 10) || 0,\n      repeat: g('Repeat').toLowerCase() === 'yes',\n      repeatEvery: parseInt(g('Repeat Every'), 10) || 0,\n      start: norm(g('Start Date')),\n      end: norm(g('End Date')),\n      next: norm(g('Next Run')),\n      status: g('Status'),\n      cycle: parseInt(g('Cycle'), 10) || 1,\n      extDays: parseInt(g('Extension Days'), 10) || 0,\n      extCount: parseInt(g('Extension Count'), 10) || 0,\n      dmMsgId: g('DM Message ID'),\n      raw,\n    });\n  }\n  return out;\n}\n\n// ---------------------------------------------------------------- main\nconst ADMIN_IDS = String(cfg.ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);\nconst MAX_EXT = parseInt(cfg.MAX_EXTENSIONS, 10) || 2;\nconst GROUP = String(cfg.GROUP_CHAT_ID);\n\n\n\n// ---------------------------------------------------------------- polling\nconst sd = $getWorkflowStaticData('global');\nconst updates = ($('P. Get updates').first().json.result) || [];\nconst tasks = parseTasks($('P. Read Tasks').first().json.values);\nconst peopleVals = $input.first().json.values || [];\n\nconst ops = [];\nlet maxId = parseInt(sd.lastUpdateId, 10) || 0;\n\nfunction routeUpdate(u) {\n  const fullName = (f) => [f.first_name, f.last_name].filter(Boolean).join(' ').trim() || String(f.id);\n\n  if (u.callback_query) {\n    const q = u.callback_query;\n    const p = String(q.data || '').split(':');\n    return { type: 'callback', action: p[0] || '', taskId: p[1] || '', arg: p[2] || '',\n      callbackQueryId: q.id, actorId: q.from.id, actorName: fullName(q.from),\n      chatId: (q.message && q.message.chat) ? q.message.chat.id : q.from.id,\n      messageId: q.message ? q.message.message_id : null,\n      originalText: (q.message && q.message.text) ? q.message.text : '' };\n  }\n\n  if (u.message && (u.message.photo || u.message.document)) {\n    const m = u.message;\n    return { type: 'proof',\n      fileId: m.photo ? m.photo[m.photo.length - 1].file_id : m.document.file_id,\n      actorId: m.from.id, actorName: fullName(m.from), chatId: m.chat.id,\n      messageId: m.message_id,\n      replyToId: m.reply_to_message ? m.reply_to_message.message_id : null,\n      caption: String(m.caption || '').trim(), taskId: '' };\n  }\n\n  if (u.message && typeof u.message.text === 'string') {\n    // \"/task@ailnotbot a | b\" -> cmd \"task\", args \"a | b\"\n    const hit = u.message.text.trim().match(/^\\/([A-Za-z_]+)(?:@[A-Za-z0-9_]+)?(?:\\s+([\\s\\S]*))?$/);\n    if (hit) {\n      const f = u.message.from;\n      const cmd = hit[1].toLowerCase();\n      const base = { actorId: f.id, actorName: fullName(f), chatId: u.message.chat.id,\n        messageId: u.message.message_id, taskId: '' };\n      if (cmd === 'start') {\n        return Object.assign(base, { type: 'register',\n          username: f.username ? '@' + f.username : '' });\n      }\n      return Object.assign(base, { type: 'command', cmd, args: (hit[2] || '').trim(),\n        replyToUserId: (u.message.reply_to_message && u.message.reply_to_message.from)\n          ? u.message.reply_to_message.from.id : null });\n    }\n  }\n\n  return null;\n}\n\nfunction handle(ctx) {\nconst tg = (method, body) => ops.push({ json: { op: 'telegram', method, body } });\nconst sheetsBatch = (data) => ops.push({ json: { op: 'sheetsBatch', body: { valueInputOption: 'RAW', data } } });\nconst append = (tab, row) => ops.push({ json: { op: 'sheetsAppend', tab, body: { values: [row] } } });\nconst logIt = (event, detail) => append('Log', [nowStamp, ctx.taskId || '', event, ctx.actorName || '', detail || '']);\nconst answer = (text, alert) => {\n  if (ctx.callbackQueryId) {\n    tg('answerCallbackQuery', { callback_query_id: ctx.callbackQueryId, text: String(text).slice(0, 190), show_alert: !!alert });\n  }\n};\nconst reply = (text) => tg('sendMessage', { chat_id: ctx.chatId, parse_mode: 'HTML', text });\nconst toGroup = (text) => tg('sendMessage', { chat_id: GROUP, parse_mode: 'HTML', disable_web_page_preview: true, text });\n\nfunction writeTask(t, patch) {\n  const v = (Array.isArray(t.raw) ? t.raw.slice(0, 13) : []).map((x) => (x === undefined ? '' : x));\n  while (v.length < 13) v.push('');\n  for (const k of Object.keys(patch)) v[IJ[k]] = patch[k];\n  sheetsBatch([{ range: 'Tasks!I' + t.rowNumber + ':U' + t.rowNumber, values: [v] }]);\n}\n\nconst PEOPLE = (() => {\n  const out = [];\n  for (let r = 1; r < peopleVals.length; r++) {\n    const row = peopleVals[r] || [];\n    const id = String(row[2] === undefined ? '' : row[2]).trim();\n    if (!id) continue;\n    out.push({\n      rowNumber: r + 1,\n      name: String(row[0] || '').trim() || id,\n      username: String(row[1] || '').trim(),\n      id,\n      role: String(row[3] || '').trim().toLowerCase(),\n    });\n  }\n  return out;\n})();\nconst personName = (id) => { const p = PEOPLE.find((x) => x.id === String(id)); return p ? p.name : String(id); };\nconst isAdmin = (id) => ADMIN_IDS.includes(String(id)) || PEOPLE.some((p) => p.id === String(id) && p.role === 'admin');\n\nconst taskButtons = (id) => ({ inline_keyboard: [\n  [{ text: '\\u2705 Mark as Done', callback_data: 'done:' + id },\n   { text: '\\u23F0 Snooze 2 days', callback_data: 'snooze:' + id }],\n  [{ text: '\\uD83D\\uDD01 Not mine', callback_data: 'reassign:' + id },\n   { text: '\\u23F3 Request extension', callback_data: 'extreq:' + id }],\n]});\n\nfunction complete(t, method, proof) {\n  append('History', [nowStamp, t.id, t.name, t.assignee, t.cycle, t.start, t.end, method, proof || '']);\n  let nextLine = '';\n  if (t.repeat) {\n    const gap = t.repeatEvery || t.duration;\n    const ns = addDays(today, gap);\n    const ne = addDays(ns, t.duration);\n    writeTask(t, { start: ns, end: ne, next: ns, status: 'Scheduled', cycle: t.cycle + 1,\n      lastSent: '', completedAt: '', completedBy: '', method: '', proof: '',\n      extDays: 0, extCount: 0, dmMsgId: '' });\n    nextLine = '\\nNext cycle starts ' + ns + '.';\n  } else {\n    writeTask(t, { status: 'Completed', completedAt: nowStamp, completedBy: ctx.actorName,\n      method, proof: proof || '' });\n  }\n  if (t.dmMsgId) {\n    tg('editMessageText', { chat_id: t.userId, message_id: parseInt(t.dmMsgId, 10), parse_mode: 'HTML',\n      text: '<b>' + esc(t.name) + '</b>\\n\\n\\u2705 Completed ' + nowStamp + ' by ' + esc(ctx.actorName) + ' (' + method + ')' });\n  }\n  toGroup('\\u2705 <b>' + esc(t.name) + '</b> completed by ' + esc(ctx.actorName)\n    + ' on ' + nowStamp + ' (' + method + ')' + nextLine);\n  logIt('completed:' + method, t.name);\n}\n\n\n// ================================================================ COMMANDS\nif (ctx.type === 'command') {\n  const admin = isAdmin(ctx.actorId);\n\n  if (ctx.cmd === 'help') {\n    reply('<b>Commands</b>\\n\\n'\n      + '<code>/task Name | @user | duration | interval</code>\\n'\n      + '   create and assign a task (admin only)\\n'\n      + '   add a 5th number to make it repeat, e.g. <code>| 180</code>\\n\\n'\n      + '<code>/tasks</code>  list every open task\\n'\n      + '<code>/mine</code>   list only your tasks\\n'\n      + '<code>/start</code>  register yourself and get your ID');\n    return;\n  }\n\n  if (ctx.cmd === 'tasks' || ctx.cmd === 'mine') {\n    let open = tasks.filter((t) => t.status === 'Active' || t.status === 'Expired');\n    if (ctx.cmd === 'mine') open = open.filter((t) => t.userId === String(ctx.actorId));\n    if (!open.length) { reply(ctx.cmd === 'mine' ? 'You have no open tasks.' : 'No open tasks.'); return; }\n    open.sort((a, b) => String(a.end || '').localeCompare(String(b.end || '')));\n    reply('<b>' + (ctx.cmd === 'mine' ? 'Your open tasks' : 'Open tasks') + '</b>\\n'\n      + open.map((t) => {\n          const left = t.end ? daysBetween(today, t.end) : null;\n          const flag = left === null ? '\\u2022' : left < 0 ? '\\uD83D\\uDD34' : left <= 7 ? '\\u26A0\\uFE0F' : '\\u2022';\n          const tail = left === null ? '' : left < 0 ? ' \\u2014 OVERDUE' : ' \\u2014 ' + left + 'd left';\n          return flag + ' <b>' + esc(t.name) + '</b> \\u2014 ' + esc(t.assignee) + tail + ' (' + t.id + ')';\n        }).join('\\n'));\n    return;\n  }\n\n  if (ctx.cmd === 'task') {\n    if (!admin) { reply('Only an admin can create tasks.'); return; }\n\n    const usage = 'Format:\\n<code>/task Task Name | @username | duration | interval</code>\\n\\n'\n      + 'Example:\\n<code>/task Safety Shoes | @manum_arl | 60 | 7</code>\\n\\n'\n      + 'Add a 5th number to repeat it after completion:\\n'\n      + '<code>/task Safety Shoes | @manum_arl | 60 | 7 | 180</code>';\n\n    const parts = String(ctx.args || '').split('|').map((x) => x.trim());\n    if (parts.length < 4) { reply(usage); return; }\n\n    const taskName = parts[0];\n    const whoRaw = parts[1];\n    const duration = parseInt(parts[2], 10);\n    const interval = parseInt(parts[3], 10);\n    const repeatEvery = parseInt(parts[4], 10) || 0;\n\n    if (!taskName) { reply('The task name is missing.\\n\\n' + usage); return; }\n    if (!duration || !interval) { reply('Duration and interval must be numbers.\\n\\n' + usage); return; }\n    if (interval > duration) { reply('Interval (' + interval + ') is longer than duration (' + duration + ') \\u2014 only the day-0 notice would ever fire.'); return; }\n\n    // resolve the assignee: reply-to > numeric id > @username > display name\n    const who = String(whoRaw || '').replace(/^@/, '').toLowerCase();\n    let person = null;\n    if (ctx.replyToUserId) person = PEOPLE.find((p) => p.id === String(ctx.replyToUserId));\n    if (!person && /^[0-9]+$/.test(who)) person = PEOPLE.find((p) => p.id === who);\n    if (!person) person = PEOPLE.find((p) => p.username.replace(/^@/, '').toLowerCase() === who);\n    if (!person) person = PEOPLE.find((p) => p.name.toLowerCase() === who);\n    if (!person) {\n      reply('I don\\'t know <b>' + esc(whoRaw) + '</b> \\u2014 they must send me /start first.\\n\\n'\n        + '<b>Registered:</b>\\n'\n        + (PEOPLE.length ? PEOPLE.map((p) => '\\u2022 ' + esc(p.name) + (p.username ? ' ' + esc(p.username) : '')).join('\\n') : '(nobody yet)'));\n      return;\n    }\n\n    const taskId = 'T-' + Math.random().toString(36).slice(2, 8).toUpperCase();\n    const end = addDays(today, duration);\n    const nextRun = addDays(today, interval);   // day 0 is announced right now\n\n    append('Tasks', [taskId, taskName, person.name, person.id, duration, interval,\n      repeatEvery ? 'Yes' : '', repeatEvery || '',\n      today, end, nextRun, 'Active', 1, today, '', '', '', '', 0, 0, '']);\n\n    toGroup('\\uD83C\\uDD95 <b>Task Assigned</b>\\n\\nTask: <b>' + esc(taskName) + '</b>\\n'\n      + 'Assigned to: <a href=\"tg://user?id=' + person.id + '\">' + esc(person.name) + '</a>\\n'\n      + 'Deadline: ' + end + ' (' + duration + ' days)\\n'\n      + 'Reminders every ' + interval + ' day(s)'\n      + (repeatEvery ? '\\nRepeats ' + repeatEvery + ' days after completion' : '')\n      + '\\nCreated by ' + esc(ctx.actorName) + ' \\u00B7 Ref: ' + taskId);\n\n    tg('sendMessage', { chat_id: person.id, parse_mode: 'HTML',\n      text: '\\uD83C\\uDD95 ' + esc(ctx.actorName) + ' assigned you a task.\\n\\n'\n        + '<b>' + esc(taskName) + '</b>\\nDeadline: ' + end + ' \\u2014 ' + duration + ' day(s) left\\n\\n'\n        + 'Press \\u2705 when done, or reply to this message with a photo as proof.',\n      reply_markup: taskButtons(taskId) });\n\n    ctx.taskId = taskId;\n    logIt('created', taskName + ' -> ' + person.name);\n    return;\n  }\n\n  reply('Unknown command \\u2014 try /help');\n  return;\n}\n\n// ================================================================ REGISTER\nif (ctx.type === 'register') {\n  const existing = PEOPLE.find((p) => p.id === String(ctx.actorId));\n  if (existing) {\n    sheetsBatch([{ range: 'People!A' + existing.rowNumber + ':C' + existing.rowNumber,\n      values: [[ctx.actorName, ctx.username, String(ctx.actorId)]] }]);\n  } else {\n    append('People', [ctx.actorName, ctx.username, String(ctx.actorId), '']);\n  }\n  reply('\\u2705 Registered.\\n\\nYour Telegram User ID is <code>' + ctx.actorId + '</code>\\n'\n    + 'Give this to the admin so they can assign you tasks.');\n  return;\n}\n\n// ================================================================ PHOTO PROOF\nif (ctx.type === 'proof') {\n  const open = tasks.filter((t) => t.userId === String(ctx.actorId)\n    && (t.status === 'Active' || t.status === 'Expired'));\n  if (open.length === 0) { reply('You have no open tasks right now.'); return; }\n\n  let m = null;\n  // 1. replied directly to the reminder DM \\u2014 most reliable\n  if (ctx.replyToId) m = open.find((t) => t.dmMsgId && String(t.dmMsgId) === String(ctx.replyToId));\n  // 2. task ref written in the caption\n  if (!m && ctx.caption) {\n    const cap = ctx.caption.toUpperCase();\n    m = open.find((t) => t.id && cap.indexOf(t.id.toUpperCase()) >= 0);\n  }\n  // 3. only one open task \\u2014 unambiguous\n  if (!m && open.length === 1) m = open[0];\n\n  if (!m) {\n    reply('You have ' + open.length + ' open tasks. Reply directly to the reminder message for the '\n      + 'one you finished, or put its ref in the caption:\\n'\n      + open.map((t) => '\\u2022 ' + esc(t.name) + ' (' + t.id + ')').join('\\n'));\n    return;\n  }\n\n  ctx.taskId = m.id;\n  // put the photo in the group so the proof is visible to everyone\n  tg('copyMessage', { chat_id: GROUP, from_chat_id: ctx.chatId, message_id: ctx.messageId,\n    caption: '\\uD83D\\uDCF7 Proof: <b>' + esc(m.name) + '</b> \\u2014 ' + esc(ctx.actorName), parse_mode: 'HTML' });\n  complete(m, 'Photo', ctx.fileId);\n  reply('\\u2705 Proof received \\u2014 <b>' + esc(m.name) + '</b> marked complete.');\n  return;\n}\n\n// ================================================================ BUTTONS\nif (ctx.type !== 'callback') return;\n\nif (ctx.action === 'cancel') {\n  tg('deleteMessage', { chat_id: ctx.chatId, message_id: ctx.messageId });\n  answer('Cancelled');\n  return;\n}\n\nconst t = tasks.find((x) => x.id && x.id === ctx.taskId);\nif (!t) { answer('Task not found \\u2014 it may have been deleted.', true); return; }\n\nconst admin = isAdmin(ctx.actorId);\nconst mine = String(ctx.actorId) === t.userId;\nconst adminOnly = (ctx.action === 'extok' || ctx.action === 'extno');\n\nif (adminOnly && !admin) { answer('Only an admin can approve extensions.', true); return; }\nif (!adminOnly && !mine && !admin) { answer('This task is assigned to someone else.', true); return; }\nif (t.status === 'Completed' && ctx.action !== 'extok') { answer('This task is already closed.', true); return; }\n\n// ---- done ----\nif (ctx.action === 'done') { complete(t, 'Button', ''); answer('\\u2705 Marked complete'); return; }\n\n// ---- snooze ----\nif (ctx.action === 'snooze') {\n  const to = addDays(today, 2);\n  writeTask(t, { next: to });\n  answer('\\u23F0 Snoozed until ' + to);\n  logIt('snoozed', 'until ' + to);\n  return;\n}\n\n// ---- reassign: show the people picker ----\nif (ctx.action === 'reassign') {\n  const cands = PEOPLE.filter((p) => p.id !== t.userId);\n  if (cands.length === 0) { answer('Nobody else is registered \\u2014 they must /start the bot first.', true); return; }\n  const btns = cands.map((p) => ({ text: p.name, callback_data: 'assign:' + t.id + ':' + p.id }));\n  const kb = [];\n  for (let i = 0; i < btns.length; i += 2) kb.push(btns.slice(i, i + 2));\n  kb.push([{ text: '\\u2716\\uFE0F Cancel', callback_data: 'cancel:' + t.id }]);\n  tg('sendMessage', { chat_id: ctx.chatId, parse_mode: 'HTML',\n    text: 'Who should <b>' + esc(t.name) + '</b> go to?\\nThe deadline stays ' + t.end + '.',\n    reply_markup: { inline_keyboard: kb } });\n  answer('Pick the new assignee');\n  return;\n}\n\n// ---- assign: apply the reassignment ----\nif (ctx.action === 'assign') {\n  const newId = String(ctx.arg || '').trim();\n  if (!newId) { answer('No person selected.', true); return; }\n  const newName = personName(newId);\n  const oldName = t.assignee;\n  sheetsBatch([{ range: 'Tasks!C' + t.rowNumber + ':D' + t.rowNumber, values: [[newName, newId]] }]);\n  writeTask(t, { next: today, dmMsgId: '' });   // fresh DM on the next scheduler run\n  tg('editMessageText', { chat_id: ctx.chatId, message_id: ctx.messageId, parse_mode: 'HTML',\n    text: '\\uD83D\\uDD01 Reassigned <b>' + esc(t.name) + '</b> to ' + esc(newName) + '.' });\n  tg('sendMessage', { chat_id: newId, parse_mode: 'HTML',\n    text: '\\uD83D\\uDD01 <b>' + esc(t.name) + '</b> has been reassigned to you by ' + esc(ctx.actorName)\n      + '.\\nDeadline: ' + t.end + ' (unchanged)',\n    reply_markup: taskButtons(t.id) });\n  toGroup('\\uD83D\\uDD01 <b>' + esc(t.name) + '</b> reassigned from ' + esc(oldName) + ' to '\n    + '<a href=\"tg://user?id=' + newId + '\">' + esc(newName) + '</a> by ' + esc(ctx.actorName)\n    + '. Deadline unchanged: ' + t.end + '.');\n  answer('\\u2705 Reassigned to ' + newName);\n  logIt('reassigned', oldName + ' -> ' + newName);\n  return;\n}\n\n// ---- extension: ask how many days ----\nif (ctx.action === 'extreq') {\n  if (t.extCount >= MAX_EXT) { answer('Extension limit reached (' + MAX_EXT + ').', true); return; }\n  tg('sendMessage', { chat_id: ctx.chatId, parse_mode: 'HTML',\n    text: '\\u23F3 How much more time do you need for <b>' + esc(t.name) + '</b>?',\n    reply_markup: { inline_keyboard: [\n      [{ text: '+7 days', callback_data: 'extend:' + t.id + ':7' },\n       { text: '+14 days', callback_data: 'extend:' + t.id + ':14' },\n       { text: '+30 days', callback_data: 'extend:' + t.id + ':30' }],\n      [{ text: '\\u2716\\uFE0F Cancel', callback_data: 'cancel:' + t.id }],\n    ]}});\n  answer('Pick how many days');\n  return;\n}\n\n// ---- extension: route to admin for approval ----\nif (ctx.action === 'extend') {\n  const days = parseInt(ctx.arg, 10) || 0;\n  if (!days) { answer('Invalid request.', true); return; }\n  if (ADMIN_IDS.length === 0) { answer('No admin configured \\u2014 set ADMIN_IDS in the Config node.', true); return; }\n  for (const a of ADMIN_IDS) {\n    tg('sendMessage', { chat_id: a, parse_mode: 'HTML',\n      text: '\\u23F3 <b>Extension request</b>\\n\\n' + esc(ctx.actorName) + ' needs <b>' + days\n        + ' more days</b> for <b>' + esc(t.name) + '</b>.\\nCurrent deadline: ' + t.end\n        + '\\nExtensions used: ' + t.extCount + '/' + MAX_EXT,\n      reply_markup: { inline_keyboard: [[\n        { text: '\\u2705 Approve +' + days + 'd', callback_data: 'extok:' + t.id + ':' + days },\n        { text: '\\u274C Deny', callback_data: 'extno:' + t.id },\n      ]]}});\n  }\n  tg('editMessageText', { chat_id: ctx.chatId, message_id: ctx.messageId, parse_mode: 'HTML',\n    text: '\\u23F3 Extension request for <b>' + esc(t.name) + '</b> (+' + days + ' days) sent to the admin.' });\n  answer('Sent to admin for approval');\n  logIt('extension_requested', '+' + days + ' days');\n  return;\n}\n\n// ---- extension approved ----\nif (ctx.action === 'extok') {\n  const days = parseInt(ctx.arg, 10) || 0;\n  const base = (t.end && t.end > today) ? t.end : today;   // never extend from a date already past\n  const newEnd = addDays(base, days);\n  writeTask(t, { end: newEnd, status: 'Active', next: today,\n    extDays: t.extDays + days, extCount: t.extCount + 1 });\n  tg('sendMessage', { chat_id: t.userId, parse_mode: 'HTML',\n    text: '\\u2705 Extension approved for <b>' + esc(t.name) + '</b>.\\nNew deadline: ' + newEnd });\n  tg('editMessageText', { chat_id: ctx.chatId, message_id: ctx.messageId, parse_mode: 'HTML',\n    text: '\\u2705 Approved +' + days + ' days for <b>' + esc(t.name) + '</b>. New deadline: ' + newEnd });\n  toGroup('\\u23F3 <b>' + esc(t.name) + '</b> extended by ' + days + ' days. New deadline: ' + newEnd\n    + ' (approved by ' + esc(ctx.actorName) + ')');\n  answer('Approved');\n  logIt('extension_approved', '+' + days + ' days, new deadline ' + newEnd);\n  return;\n}\n\n// ---- extension denied ----\nif (ctx.action === 'extno') {\n  tg('sendMessage', { chat_id: t.userId, parse_mode: 'HTML',\n    text: '\\u274C Extension denied for <b>' + esc(t.name) + '</b>. The deadline stays ' + t.end + '.' });\n  tg('editMessageText', { chat_id: ctx.chatId, message_id: ctx.messageId, parse_mode: 'HTML',\n    text: '\\u274C Denied extension for <b>' + esc(t.name) + '</b>.' });\n  answer('Denied');\n  logIt('extension_denied', '');\n  return;\n}\n\nanswer('Unknown action.', true);\nreturn;\n\n}\n\n// ---- run every polled update through the same logic ----\nfor (const u of updates) {\n  if (typeof u.update_id === 'number' && u.update_id > maxId) maxId = u.update_id;\n  const ctx = routeUpdate(u);\n  if (!ctx) continue;\n  try { handle(ctx); }\n  catch (e) { ops.push({ json: { op: 'telegram', method: 'sendMessage', body: {\n    chat_id: cfg.ADMIN_IDS.split(',')[0].trim(), text: 'Handler error: ' + e.message } } }); }\n}\n\nif (updates.length > 0) {\n  sd.lastUpdateId = maxId;\n  // Confirm the batch server-side so Telegram never resends it, even if n8n's\n  // static data is lost. This is what makes the poll idempotent.\n  ops.push({ json: { op: 'telegram', method: 'getUpdates',\n    body: { offset: maxId + 1, limit: 1, timeout: 0 } } });\n}\n\nreturn ops;\n"
+      },
+      "id": "83a8b374-931e-4f3c-a6f1-22ae90ad3b07",
+      "name": "P. Handle updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -128,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "201e40e7-fcdb-41c2-9cf0-69d26cc4f269",
+                    "leftValue": "={{ $json.op }}",
+                    "rightValue": "sheetsBatch",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "sheetsBatch"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fb76d94e-a3d9-4f2c-88f3-a84df78d563a",
+                    "leftValue": "={{ $json.op }}",
+                    "rightValue": "sheetsAppend",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "sheetsAppend"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "39f53675-89ad-468b-88af-fac875997752",
+                    "leftValue": "={{ $json.op }}",
+                    "rightValue": "telegram",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "telegram"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "5792aeac-57de-457a-bb7c-282593ef065c",
+      "name": "P. Route op",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        80,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $('P. Config').first().json.SHEET_ID }}/values:batchUpdate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "f0d7a889-a5b8-4625-bb8c-49ef2a350244",
+      "name": "P. Sheets batchUpdate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        288,
+        480
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $('P. Config').first().json.SHEET_ID }}/values/{{ $json.tab }}!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "f1ea3588-8f31-4a66-9bf8-a95ff8f610f3",
+      "name": "P. Sheets append",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        288,
+        640
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $('P. Config').first().json.BOT_TOKEN }}/{{ $json.method }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "4b6a1796-9f37-4ab7-9edd-2fbf5594f2be",
+      "name": "P. Telegram call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        288,
+        800
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "P. Every minute": {
+      "main": [
+        [
+          {
+            "node": "P. Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "P. Config": {
+      "main": [
+        [
+          {
+            "node": "P. Get offset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "P. Get offset": {
+      "main": [
+        [
+          {
+            "node": "P. Get updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "P. Get updates": {
+      "main": [
+        [
+          {
+            "node": "P. Read Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "P. Read Tasks": {
+      "main": [
+        [
+          {
+            "node": "P. Read People",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "P. Read People": {
+      "main": [
+        [
+          {
+            "node": "P. Handle updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "P. Handle updates": {
+      "main": [
+        [
+          {
+            "node": "P. Route op",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "P. Route op": {
+      "main": [
+        [
+          {
+            "node": "P. Sheets batchUpdate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "P. Sheets append",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "P. Telegram call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "nodeGroups": [],
+  "tags": []
+}

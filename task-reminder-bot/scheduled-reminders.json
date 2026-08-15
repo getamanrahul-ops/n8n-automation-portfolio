@@ -1,0 +1,623 @@
+{
+  "name": "Task Reminder — Outbound",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 10 * * *"
+            }
+          ]
+        }
+      },
+      "id": "61bbb0bd-9a7a-441d-9cdc-e75286129aeb",
+      "name": "A. Daily 10:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -3952,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "55eec547-ae10-4fa8-a664-05075e38a590",
+              "name": "BOT_TOKEN",
+              "value": "YOUR_TELEGRAM_BOT_TOKEN",
+              "type": "string"
+            },
+            {
+              "id": "65dd9da8-c20a-40d6-9358-33de2fe2b9b4",
+              "name": "SHEET_ID",
+              "value": "YOUR_GOOGLE_SHEET_ID",
+              "type": "string"
+            },
+            {
+              "id": "83adfc02-dd56-458f-99ef-9b96d0d586a5",
+              "name": "GROUP_CHAT_ID",
+              "value": "YOUR_GROUP_CHAT_ID",
+              "type": "string"
+            },
+            {
+              "id": "c2a89460-e628-47c6-9634-33a62b9f0975",
+              "name": "ADMIN_IDS",
+              "value": "YOUR_ADMIN_TELEGRAM_USER_ID",
+              "type": "string"
+            },
+            {
+              "id": "474fb84b-9576-445e-ac37-b1ae00542204",
+              "name": "TZ",
+              "value": "Asia/Dhaka",
+              "type": "string"
+            },
+            {
+              "id": "bc4bb4b0-2797-4eb4-b7f2-11ca0f10420e",
+              "name": "MAX_EXTENSIONS",
+              "value": "2",
+              "type": "string"
+            },
+            {
+              "id": "bb8d3888-2bf3-4640-a9bf-61b1955387e1",
+              "name": "EXTEND_WINDOW",
+              "value": "7",
+              "type": "string"
+            },
+            {
+              "id": "7fc12ceb-2a88-460f-92cc-58ccafb104cf",
+              "name": "FINAL_WARNING",
+              "value": "true",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0decf88e-24c8-42d3-af17-676e186d2e18",
+      "name": "A. Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -3760,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $('A. Config').first().json.SHEET_ID }}/values/Tasks!A1:U2000",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "options": {}
+      },
+      "id": "18fcb897-2af3-4543-837f-3afa8fa018d8",
+      "name": "A. Read Tasks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3552,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('A. Config').first().json;\n\n// ---- shared helpers -------------------------------------------------\nconst TZ = cfg.TZ || 'Asia/Dhaka';\nconst dfmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });\nconst sfmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });\nconst today = dfmt.format(new Date());\nconst nowStamp = sfmt.format(new Date());\n\nconst addDays = (iso, n) => {\n  const d = new Date(iso + 'T00:00:00Z');\n  d.setUTCDate(d.getUTCDate() + (parseInt(n, 10) || 0));\n  return d.toISOString().slice(0, 10);\n};\nconst daysBetween = (a, b) =>\n  Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);\nconst norm = (v) => {\n  if (v === null || v === undefined || v === '') return '';\n  const s = String(v).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}/.test(s)) return s.slice(0, 10);\n  const d = new Date(s);\n  return isNaN(d.getTime()) ? '' : dfmt.format(d);\n};\nconst esc = (s) => String(s === undefined || s === null ? '' : s)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst colLetter = (i) => String.fromCharCode(65 + i);\n\n// Tasks sheet layout: A..U. Bot owns A and I..U.\nconst TASK_COLS = ['Task ID','Task Name','Assignee','Telegram User ID','Duration','Interval',\n  'Repeat','Repeat Every','Start Date','End Date','Next Run','Status','Cycle','Last Sent',\n  'Completed At','Completed By','Method','Proof URL','Extension Days','Extension Count','DM Message ID'];\n// index inside the I..U slice (13 wide)\nconst IJ = { start:0, end:1, next:2, status:3, cycle:4, lastSent:5, completedAt:6,\n             completedBy:7, method:8, proof:9, extDays:10, extCount:11, dmMsgId:12 };\n\nfunction parseTasks(values) {\n  if (!values || values.length < 2) return [];\n  const head = (values[0] || []).map((h) => String(h || '').trim());\n  const at = (name) => head.indexOf(name);\n  for (const c of TASK_COLS) {\n    if (at(c) < 0) throw new Error('Tasks sheet is missing the column: ' + c);\n  }\n  const out = [];\n  for (let r = 1; r < values.length; r++) {\n    const row = values[r] || [];\n    const g = (name) => String(row[at(name)] === undefined ? '' : row[at(name)]).trim();\n    const taskName = g('Task Name');\n    const userId = g('Telegram User ID');\n    if (!taskName && !userId) continue;             // truly blank row\n    const raw = [];\n    for (let i = 8; i <= 20; i++) raw.push(row[i] === undefined ? '' : row[i]);\n    out.push({\n      rowNumber: r + 1,\n      id: g('Task ID'),\n      name: taskName,\n      assignee: g('Assignee') || 'Unassigned',\n      userId,\n      duration: parseInt(g('Duration'), 10) || 0,\n      interval: parseInt(g('Interval'), 10) || 0,\n      repeat: g('Repeat').toLowerCase() === 'yes',\n      repeatEvery: parseInt(g('Repeat Every'), 10) || 0,\n      start: norm(g('Start Date')),\n      end: norm(g('End Date')),\n      next: norm(g('Next Run')),\n      status: g('Status'),\n      cycle: parseInt(g('Cycle'), 10) || 1,\n      extDays: parseInt(g('Extension Days'), 10) || 0,\n      extCount: parseInt(g('Extension Count'), 10) || 0,\n      dmMsgId: g('DM Message ID'),\n      raw,\n    });\n  }\n  return out;\n}\n\n// ---------------------------------------------------------------- main\nconst FINAL_WARNING = String(cfg.FINAL_WARNING || 'true').toLowerCase() !== 'false';\nconst EXTEND_WINDOW = parseInt(cfg.EXTEND_WINDOW, 10) || 7;\n\nconst tasks = parseTasks($input.first().json.values);\nconst out = [];\n\nfor (const t of tasks) {\n  if (!t.name || !t.userId || !t.duration || !t.interval) continue;   // incomplete row\n\n  let status = t.status;\n  let start = t.start, end = t.end, next = t.next, cycle = t.cycle;\n  let taskId = t.id;\n\n  if (status === 'Completed') continue;\n\n  // Revival: an admin pushed End Date into the future on an expired task\n  if (status === 'Expired') {\n    if (end && today <= end) {\n      status = 'Active';\n      if (!next || next <= today) next = today;\n    } else {\n      continue;\n    }\n  }\n\n  let kind = 'reminder';\n\n  // ---- bootstrap a brand new row ----\n  if (!start) {\n    start = today;\n    end = addDays(start, t.duration);\n    next = today;                                   // day-0 announcement\n    status = 'Active';\n    taskId = taskId || ('T-' + Math.random().toString(36).slice(2, 8).toUpperCase());\n    kind = 'assigned';\n  }\n\n  // ---- dormant next cycle of a repeating task ----\n  if (status === 'Scheduled') {\n    if (today < start) continue;\n    status = 'Active';\n    kind = 'assigned';\n  }\n\n  // ---- window closed without completion ----\n  if (end && today > end) {\n    out.push({ json: {\n      action: 'expire', kind: 'expired',\n      rowNumber: t.rowNumber, taskId, taskName: t.name, assignee: t.assignee,\n      userId: t.userId, cycle, start, end, next, daysLeft: 0,\n      today, nowStamp, raw: t.raw, dmMsgId: t.dmMsgId,\n      groupText: '\\u23F0 <b>Overdue</b>\\n\\nTask: <b>' + esc(t.name) + '</b>\\n'\n        + 'Assignee: <a href=\"tg://user?id=' + t.userId + '\">' + esc(t.assignee) + '</a>\\n'\n        + 'Deadline was ' + end + ' \\u2014 not completed.\\nRef: ' + taskId,\n      dmText: '\\u23F0 <b>' + esc(t.name) + '</b> is overdue.\\nThe deadline was ' + end\n        + '.\\n\\nYou can still close it, or ask for more time.',\n      dmKeyboard: { inline_keyboard: [\n        [{ text: '\\u2705 Mark as Done', callback_data: 'done:' + taskId }],\n        [{ text: '\\u23F3 Request extension', callback_data: 'extreq:' + taskId }],\n      ]},\n    }});\n    continue;\n  }\n\n  const isFinal = FINAL_WARNING && today === end;\n  const isDue = next !== '' && today >= next;\n  if (!isDue && !isFinal) continue;\n\n  // Advance from the scheduled date, not from today, so a missed run doesn't\n  // shift the cadence; the loop also skips fully-missed pings.\n  let newNext = next;\n  if (isDue) {\n    let guard = 0;\n    while (newNext !== '' && newNext <= today && guard++ < 1000) {\n      newNext = addDays(newNext, t.interval);\n    }\n  }\n\n  if (isFinal && kind === 'reminder') kind = 'final';\n\n  const daysLeft = daysBetween(today, end);\n  const showExtend = kind === 'final' || daysLeft <= EXTEND_WINDOW;\n  const header = kind === 'assigned' ? '\\uD83C\\uDD95 <b>Task Assigned</b>'\n    : kind === 'final' ? '\\u26A0\\uFE0F <b>Deadline Today</b>'\n    : '\\uD83D\\uDD14 <b>Task Reminder</b>';\n  const cyc = cycle > 1 ? ' (cycle ' + cycle + ')' : '';\n\n  const kb = [\n    [{ text: '\\u2705 Mark as Done', callback_data: 'done:' + taskId },\n     { text: '\\u23F0 Snooze 2 days', callback_data: 'snooze:' + taskId }],\n    [{ text: '\\uD83D\\uDD01 Not mine', callback_data: 'reassign:' + taskId }],\n  ];\n  if (showExtend) kb[1].push({ text: '\\u23F3 Request extension', callback_data: 'extreq:' + taskId });\n\n  out.push({ json: {\n    action: 'send', kind,\n    rowNumber: t.rowNumber, taskId, taskName: t.name, assignee: t.assignee,\n    userId: t.userId, cycle, start, end, next: newNext, daysLeft,\n    today, nowStamp, raw: t.raw, dmMsgId: t.dmMsgId,\n    groupText: header + '\\n\\nTask: <b>' + esc(t.name) + '</b>' + cyc + '\\n'\n      + 'Assigned to: <a href=\"tg://user?id=' + t.userId + '\">' + esc(t.assignee) + '</a>\\n'\n      + 'Deadline: ' + end + ' \\u2014 ' + daysLeft + ' day(s) left\\nRef: ' + taskId,\n    dmText: (kind === 'assigned' ? '\\uD83C\\uDD95 You have been assigned a task.'\n           : kind === 'final' ? '\\u26A0\\uFE0F Deadline is today.'\n           : '\\uD83D\\uDD14 This task is still open.')\n      + '\\n\\n<b>' + esc(t.name) + '</b>\\nDeadline: ' + end + ' \\u2014 ' + daysLeft + ' day(s) left'\n      + '\\n\\nPress \\u2705 when done, or reply to this message with a photo as proof.',\n    dmKeyboard: { inline_keyboard: kb },\n  }});\n}\n\nreturn out;\n"
+      },
+      "id": "ccbee2a5-74e3-46cc-8c98-41e8568c7a3a",
+      "name": "A. Evaluate tasks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3360,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $('A. Config').first().json.BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('A. Config').first().json.GROUP_CHAT_ID, parse_mode: 'HTML', disable_web_page_preview: true, text: $json.groupText }) }}",
+        "options": {}
+      },
+      "id": "439c9d7f-ae3c-45be-978c-14f085a64ea1",
+      "name": "A. Send group message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3152,
+        160
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $('A. Config').first().json.BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('A. Evaluate tasks').item.json.userId, parse_mode: 'HTML', text: $('A. Evaluate tasks').item.json.dmText, reply_markup: $('A. Evaluate tasks').item.json.dmKeyboard }) }}",
+        "options": {}
+      },
+      "id": "6dc5c79a-6e55-4268-be2a-9134a7ad5bac",
+      "name": "A. Send DM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2960,
+        160
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('A. Config').first().json;\n\n// ---- shared helpers -------------------------------------------------\nconst TZ = cfg.TZ || 'Asia/Dhaka';\nconst dfmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });\nconst sfmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });\nconst today = dfmt.format(new Date());\nconst nowStamp = sfmt.format(new Date());\n\nconst addDays = (iso, n) => {\n  const d = new Date(iso + 'T00:00:00Z');\n  d.setUTCDate(d.getUTCDate() + (parseInt(n, 10) || 0));\n  return d.toISOString().slice(0, 10);\n};\nconst daysBetween = (a, b) =>\n  Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);\nconst norm = (v) => {\n  if (v === null || v === undefined || v === '') return '';\n  const s = String(v).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}/.test(s)) return s.slice(0, 10);\n  const d = new Date(s);\n  return isNaN(d.getTime()) ? '' : dfmt.format(d);\n};\nconst esc = (s) => String(s === undefined || s === null ? '' : s)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst colLetter = (i) => String.fromCharCode(65 + i);\n\n// Tasks sheet layout: A..U. Bot owns A and I..U.\nconst TASK_COLS = ['Task ID','Task Name','Assignee','Telegram User ID','Duration','Interval',\n  'Repeat','Repeat Every','Start Date','End Date','Next Run','Status','Cycle','Last Sent',\n  'Completed At','Completed By','Method','Proof URL','Extension Days','Extension Count','DM Message ID'];\n// index inside the I..U slice (13 wide)\nconst IJ = { start:0, end:1, next:2, status:3, cycle:4, lastSent:5, completedAt:6,\n             completedBy:7, method:8, proof:9, extDays:10, extCount:11, dmMsgId:12 };\n\nfunction parseTasks(values) {\n  if (!values || values.length < 2) return [];\n  const head = (values[0] || []).map((h) => String(h || '').trim());\n  const at = (name) => head.indexOf(name);\n  for (const c of TASK_COLS) {\n    if (at(c) < 0) throw new Error('Tasks sheet is missing the column: ' + c);\n  }\n  const out = [];\n  for (let r = 1; r < values.length; r++) {\n    const row = values[r] || [];\n    const g = (name) => String(row[at(name)] === undefined ? '' : row[at(name)]).trim();\n    const taskName = g('Task Name');\n    const userId = g('Telegram User ID');\n    if (!taskName && !userId) continue;             // truly blank row\n    const raw = [];\n    for (let i = 8; i <= 20; i++) raw.push(row[i] === undefined ? '' : row[i]);\n    out.push({\n      rowNumber: r + 1,\n      id: g('Task ID'),\n      name: taskName,\n      assignee: g('Assignee') || 'Unassigned',\n      userId,\n      duration: parseInt(g('Duration'), 10) || 0,\n      interval: parseInt(g('Interval'), 10) || 0,\n      repeat: g('Repeat').toLowerCase() === 'yes',\n      repeatEvery: parseInt(g('Repeat Every'), 10) || 0,\n      start: norm(g('Start Date')),\n      end: norm(g('End Date')),\n      next: norm(g('Next Run')),\n      status: g('Status'),\n      cycle: parseInt(g('Cycle'), 10) || 1,\n      extDays: parseInt(g('Extension Days'), 10) || 0,\n      extCount: parseInt(g('Extension Count'), 10) || 0,\n      dmMsgId: g('DM Message ID'),\n      raw,\n    });\n  }\n  return out;\n}\n\n// ---------------------------------------------------------------- main\nconst evals = $('A. Evaluate tasks').all();\nconst ins = $input.all();\nconst ops = [];\n\nfor (let i = 0; i < ins.length; i++) {\n  const t = (evals[i] || {}).json;\n  if (!t) continue;\n  const dm = ins[i].json || {};\n  const dmOk = dm.ok === true && dm.result;\n  const dmMsgId = dmOk ? String(dm.result.message_id) : (t.dmMsgId || '');\n\n  const v = (Array.isArray(t.raw) ? t.raw.slice(0, 13) : []).map((x) => (x === undefined ? '' : x));\n  while (v.length < 13) v.push('');\n\n  if (t.action === 'send') {\n    v[IJ.start] = t.start;\n    v[IJ.end] = t.end;\n    v[IJ.next] = t.next;\n    v[IJ.status] = 'Active';\n    v[IJ.cycle] = t.cycle;\n    v[IJ.lastSent] = t.today;\n    v[IJ.dmMsgId] = dmMsgId;\n  } else {\n    v[IJ.status] = 'Expired';\n    v[IJ.dmMsgId] = dmMsgId;\n  }\n\n  ops.push({ json: { op: 'sheetsBatch', body: { valueInputOption: 'RAW', data: [\n    { range: 'Tasks!A' + t.rowNumber, values: [[t.taskId]] },\n    { range: 'Tasks!I' + t.rowNumber + ':U' + t.rowNumber, values: [v] },\n  ]}}});\n\n  ops.push({ json: { op: 'sheetsAppend', tab: 'Log', body: { values: [[\n    t.nowStamp, t.taskId,\n    t.action === 'send' ? 'sent:' + t.kind : 'expired',\n    'system', t.taskName + ' -> ' + t.assignee,\n  ]]}}});\n\n  if (!dmOk) {\n    ops.push({ json: { op: 'telegram', method: 'sendMessage', body: {\n      chat_id: cfg.GROUP_CHAT_ID, parse_mode: 'HTML',\n      text: '\\u26A0\\uFE0F Could not DM ' + esc(t.assignee) + ' about <b>' + esc(t.taskName)\n        + '</b>. They need to send /start to the bot first.',\n    }}});\n  }\n}\n\nreturn ops;\n"
+      },
+      "id": "114d1269-b08c-45a4-bc0d-fc07afa7c237",
+      "name": "A. Build operations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2752,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "bff0ac3a-783f-4778-8dfb-170f2aa6afc7",
+                    "leftValue": "={{ $json.op }}",
+                    "rightValue": "sheetsBatch",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "sheetsBatch"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5c3e3b48-d254-4310-909c-ea6a14fd8c59",
+                    "leftValue": "={{ $json.op }}",
+                    "rightValue": "sheetsAppend",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "sheetsAppend"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "85856602-3d38-4c1b-86cf-02735c3a7cf1",
+                    "leftValue": "={{ $json.op }}",
+                    "rightValue": "telegram",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "telegram"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "1dd44cb5-906c-415c-b95a-3750a66b1d5d",
+      "name": "A. Route op",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -2560,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $('A. Config').first().json.SHEET_ID }}/values:batchUpdate",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "1ea1ebba-f67e-4e0b-b759-8f8057f2b947",
+      "name": "A. Sheets batchUpdate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2336,
+        16
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $('A. Config').first().json.SHEET_ID }}/values/{{ $json.tab }}!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "9bad4883-e267-48ec-b9a4-b5f82b8c359c",
+      "name": "A. Sheets append",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2336,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $('A. Config').first().json.BOT_TOKEN }}/{{ $json.method }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {}
+      },
+      "id": "1342dad0-fe38-4ee1-9956-7daef6d61c04",
+      "name": "A. Telegram call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2336,
+        304
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 11 * * 6"
+            }
+          ]
+        }
+      },
+      "id": "631d7120-874f-4f3f-81e9-f7a23b5e8825",
+      "name": "C. Saturday 11:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -3952,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "5d1832cd-dea9-4e63-ba8e-7ed5a1d90ca2",
+              "name": "BOT_TOKEN",
+              "value": "YOUR_TELEGRAM_BOT_TOKEN",
+              "type": "string"
+            },
+            {
+              "id": "c96fdd19-04e4-4fd6-a003-0af4c9fb6a82",
+              "name": "SHEET_ID",
+              "value": "YOUR_GOOGLE_SHEET_ID",
+              "type": "string"
+            },
+            {
+              "id": "4e41d2a8-95e2-4930-9f52-613be7d91b08",
+              "name": "GROUP_CHAT_ID",
+              "value": "YOUR_GROUP_CHAT_ID",
+              "type": "string"
+            },
+            {
+              "id": "2fa09b25-141c-49bb-ba27-8c0f9f26a5e6",
+              "name": "TZ",
+              "value": "Asia/Dhaka",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "c5fa14dd-06c5-4f21-975e-d53f641b0ccb",
+      "name": "C. Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -3760,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://sheets.googleapis.com/v4/spreadsheets/{{ $('C. Config').first().json.SHEET_ID }}/values/Tasks!A1:U2000",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleSheetsOAuth2Api",
+        "options": {}
+      },
+      "id": "9a21b1a6-dc44-4ec6-83f9-557c6da88354",
+      "name": "C. Read Tasks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3552,
+        480
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_GOOGLE_SHEETS_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const cfg = $('C. Config').first().json;\n\n// ---- shared helpers -------------------------------------------------\nconst TZ = cfg.TZ || 'Asia/Dhaka';\nconst dfmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' });\nconst sfmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });\nconst today = dfmt.format(new Date());\nconst nowStamp = sfmt.format(new Date());\n\nconst addDays = (iso, n) => {\n  const d = new Date(iso + 'T00:00:00Z');\n  d.setUTCDate(d.getUTCDate() + (parseInt(n, 10) || 0));\n  return d.toISOString().slice(0, 10);\n};\nconst daysBetween = (a, b) =>\n  Math.round((new Date(b + 'T00:00:00Z') - new Date(a + 'T00:00:00Z')) / 86400000);\nconst norm = (v) => {\n  if (v === null || v === undefined || v === '') return '';\n  const s = String(v).trim();\n  if (/^\\d{4}-\\d{2}-\\d{2}/.test(s)) return s.slice(0, 10);\n  const d = new Date(s);\n  return isNaN(d.getTime()) ? '' : dfmt.format(d);\n};\nconst esc = (s) => String(s === undefined || s === null ? '' : s)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst colLetter = (i) => String.fromCharCode(65 + i);\n\n// Tasks sheet layout: A..U. Bot owns A and I..U.\nconst TASK_COLS = ['Task ID','Task Name','Assignee','Telegram User ID','Duration','Interval',\n  'Repeat','Repeat Every','Start Date','End Date','Next Run','Status','Cycle','Last Sent',\n  'Completed At','Completed By','Method','Proof URL','Extension Days','Extension Count','DM Message ID'];\n// index inside the I..U slice (13 wide)\nconst IJ = { start:0, end:1, next:2, status:3, cycle:4, lastSent:5, completedAt:6,\n             completedBy:7, method:8, proof:9, extDays:10, extCount:11, dmMsgId:12 };\n\nfunction parseTasks(values) {\n  if (!values || values.length < 2) return [];\n  const head = (values[0] || []).map((h) => String(h || '').trim());\n  const at = (name) => head.indexOf(name);\n  for (const c of TASK_COLS) {\n    if (at(c) < 0) throw new Error('Tasks sheet is missing the column: ' + c);\n  }\n  const out = [];\n  for (let r = 1; r < values.length; r++) {\n    const row = values[r] || [];\n    const g = (name) => String(row[at(name)] === undefined ? '' : row[at(name)]).trim();\n    const taskName = g('Task Name');\n    const userId = g('Telegram User ID');\n    if (!taskName && !userId) continue;             // truly blank row\n    const raw = [];\n    for (let i = 8; i <= 20; i++) raw.push(row[i] === undefined ? '' : row[i]);\n    out.push({\n      rowNumber: r + 1,\n      id: g('Task ID'),\n      name: taskName,\n      assignee: g('Assignee') || 'Unassigned',\n      userId,\n      duration: parseInt(g('Duration'), 10) || 0,\n      interval: parseInt(g('Interval'), 10) || 0,\n      repeat: g('Repeat').toLowerCase() === 'yes',\n      repeatEvery: parseInt(g('Repeat Every'), 10) || 0,\n      start: norm(g('Start Date')),\n      end: norm(g('End Date')),\n      next: norm(g('Next Run')),\n      status: g('Status'),\n      cycle: parseInt(g('Cycle'), 10) || 1,\n      extDays: parseInt(g('Extension Days'), 10) || 0,\n      extCount: parseInt(g('Extension Count'), 10) || 0,\n      dmMsgId: g('DM Message ID'),\n      raw,\n    });\n  }\n  return out;\n}\n\n// ---------------------------------------------------------------- main\nconst tasks = parseTasks($input.first().json.values);\nconst open = [];\n\nfor (const t of tasks) {\n  if (!t.name) continue;\n  if (t.status !== 'Active' && t.status !== 'Expired') continue;\n  open.push({\n    name: t.name,\n    assignee: t.assignee,\n    userId: t.userId,\n    end: t.end,\n    left: t.end ? daysBetween(today, t.end) : null,\n    overdue: t.status === 'Expired' || (t.end && today > t.end),\n  });\n}\n\nif (open.length === 0) {\n  return [{ json: { text: '\\uD83D\\uDCCB <b>Weekly Task Digest</b>\\n\\n\\u2705 Nothing open. All clear.' } }];\n}\n\nconst byPerson = {};\nfor (const t of open) (byPerson[t.assignee] = byPerson[t.assignee] || []).push(t);\n\nconst lines = ['\\uD83D\\uDCCB <b>Weekly Task Digest</b>', open.length + ' open task(s)', ''];\n\nconst names = Object.keys(byPerson).sort();\nfor (const person of names) {\n  const list = byPerson[person];\n  list.sort((a, b) => (a.left === null ? 999 : a.left) - (b.left === null ? 999 : b.left));\n  const uid = (list.find((x) => x.userId) || {}).userId;\n  lines.push(uid\n    ? '<a href=\"tg://user?id=' + uid + '\">' + esc(person) + '</a>'\n    : '<b>' + esc(person) + '</b>');\n  for (const t of list) {\n    const flag = t.overdue ? '\\uD83D\\uDD34' : (t.left !== null && t.left <= 7) ? '\\u26A0\\uFE0F' : '\\u2022';\n    const tail = t.overdue\n      ? 'OVERDUE \\u2014 was due ' + t.end\n      : (t.left + 'd left (' + t.end + ')');\n    lines.push('   ' + flag + ' ' + esc(t.name) + ' \\u2014 ' + tail);\n  }\n  lines.push('');\n}\n\nconst overdue = open.filter((t) => t.overdue).length;\nconst soon = open.filter((t) => !t.overdue && t.left !== null && t.left <= 7).length;\nlines.push('\\uD83D\\uDD34 ' + overdue + ' overdue \\u00B7 \\u26A0\\uFE0F ' + soon + ' due within 7 days');\n\nreturn [{ json: { text: lines.join('\\n') } }];\n"
+      },
+      "id": "646cea64-21cd-41e7-a772-cce368682926",
+      "name": "C. Build digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3360,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $('C. Config').first().json.BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ chat_id: $('C. Config').first().json.GROUP_CHAT_ID, parse_mode: 'HTML', disable_web_page_preview: true, text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "d52db86c-6a5b-46c0-9b20-4916be684eb9",
+      "name": "C. Post digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3136,
+        480
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "A. Daily 10:00": {
+      "main": [
+        [
+          {
+            "node": "A. Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A. Config": {
+      "main": [
+        [
+          {
+            "node": "A. Read Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A. Read Tasks": {
+      "main": [
+        [
+          {
+            "node": "A. Evaluate tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A. Evaluate tasks": {
+      "main": [
+        [
+          {
+            "node": "A. Send group message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A. Send group message": {
+      "main": [
+        [
+          {
+            "node": "A. Send DM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A. Send DM": {
+      "main": [
+        [
+          {
+            "node": "A. Build operations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A. Build operations": {
+      "main": [
+        [
+          {
+            "node": "A. Route op",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "A. Route op": {
+      "main": [
+        [
+          {
+            "node": "A. Sheets batchUpdate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "A. Sheets append",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "A. Telegram call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C. Saturday 11:00": {
+      "main": [
+        [
+          {
+            "node": "C. Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C. Config": {
+      "main": [
+        [
+          {
+            "node": "C. Read Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C. Read Tasks": {
+      "main": [
+        [
+          {
+            "node": "C. Build digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "C. Build digest": {
+      "main": [
+        [
+          {
+            "node": "C. Post digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "tags": []
+}
